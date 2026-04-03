@@ -47,6 +47,18 @@ class WebhookChannel(BaseChannel):
         self._pending: dict[str, asyncio.Future[str]] = {}
         self._runner: web.AppRunner | None = None
 
+    def is_allowed(self, sender_id: str) -> bool:
+        """Check allowFrom — supports both dict and object config."""
+        if isinstance(self.config, dict):
+            allow_list = self.config.get("allowFrom", self.config.get("allow_from", []))
+        else:
+            allow_list = getattr(self.config, "allow_from", [])
+        if not allow_list:
+            return False
+        if "*" in allow_list:
+            return True
+        return str(sender_id) in allow_list
+
     @classmethod
     def default_config(cls) -> dict[str, Any]:
         return {
