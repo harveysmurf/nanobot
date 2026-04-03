@@ -1,9 +1,15 @@
-"""Memory system for persistent agent memory."""
+"""Memory system — LCM (Lossless Context Management) backend.
+
+Replaces the flat MEMORY.md/HISTORY.md approach with a SQLite-backed
+hierarchical summarization DAG. Messages are archived into lcm.db,
+then compacted into leaf summaries and condensed up the tree.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
+import sqlite3
 import weakref
 from datetime import datetime
 from pathlib import Path
@@ -18,45 +24,154 @@ if TYPE_CHECKING:
     from nanobot.session.manager import Session, SessionManager
 
 
-_SAVE_MEMORY_TOOL = [
+# ---------------------------------------------------------------------------
+# Schema — auto-created if lcm.db doesn't exist
+# ---------------------------------------------------------------------------
+
+_LCM_SCHEMA = """\
+PRAGMA journal_mode = WAL;
+PRAGMA foreign_keys = ON;
+
+CREATE TABLE IF NOT EXISTS conversations (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_key TEXT    NOT NULL UNIQUE,
+    created_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+    updated_at  TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+    seq             INTEGER NOT NULL,
+    role            TEXT    NOT NULL CHECK (role IN ('user','assistant','system','tool')),
+    content         TEXT    NOT NULL,
+    token_count     INTEGER NOT NULL DEFAULT 0,
+    tools_used      TEXT,
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now')),
+    UNIQUE(conversation_id, seq)
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+    content, content=messages, content_rowid=id
+);
+
+CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+    INSERT INTO messages_fts(rowid, content) VALUES (new.id, new.content);
+END;
+
+CREATE TABLE IF NOT EXISTS summaries (
+    id               TEXT    PRIMARY KEY,
+    conversation_id  INTEGER REFERENCES conversations(id),
+    depth            INTEGER NOT NULL DEFAULT 0,
+    kind             TEXT    NOT NULL CHECK (kind IN ('leaf','condensed')),
+    content          TEXT    NOT NULL,
+    token_count      INTEGER NOT NULL DEFAULT 0,
+    earliest_at      TEXT    NOT NULL,
+    latest_at        TEXT    NOT NULL,
+    descendant_count INTEGER NOT NULL DEFAULT 0,
+    superseded       INTEGER NOT NULL DEFAULT 0,
+    created_at       TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
+);
+
+CREATE VIRTUAL TABLE IF NOT EXISTS summaries_fts USING fts5(
+    content, content=summaries, content_rowid=rowid
+);
+
+CREATE TRIGGER IF NOT EXISTS summaries_ai AFTER INSERT ON summaries BEGIN
+    INSERT INTO summaries_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+
+CREATE TABLE IF NOT EXISTS summary_messages (
+    summary_id TEXT    NOT NULL REFERENCES summaries(id),
+    message_id INTEGER NOT NULL REFERENCES messages(id),
+    PRIMARY KEY (summary_id, message_id)
+);
+
+CREATE TABLE IF NOT EXISTS summary_parents (
+    summary_id TEXT NOT NULL REFERENCES summaries(id),
+    parent_id  TEXT NOT NULL REFERENCES summaries(id),
+    PRIMARY KEY (summary_id, parent_id)
+);
+
+CREATE TABLE IF NOT EXISTS context_items (
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+    ordinal         INTEGER NOT NULL,
+    item_type       TEXT    NOT NULL CHECK (item_type IN ('message','summary')),
+    message_id      INTEGER REFERENCES messages(id),
+    summary_id      TEXT    REFERENCES summaries(id),
+    PRIMARY KEY (conversation_id, ordinal)
+);
+
+CREATE TABLE IF NOT EXISTS large_files (
+    id              TEXT    PRIMARY KEY,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id),
+    file_name       TEXT,
+    mime_type       TEXT,
+    byte_size       INTEGER,
+    token_count     INTEGER,
+    exploration     TEXT,
+    storage_path    TEXT    NOT NULL,
+    created_at      TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%S','now'))
+);
+
+CREATE TABLE IF NOT EXISTS lcm_config (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+INSERT OR IGNORE INTO lcm_config (key, value) VALUES
+    ('leaf_min_fanout',        '8'),
+    ('condensed_min_fanout',   '4'),
+    ('leaf_target_tokens',     '1200'),
+    ('condensed_target_tokens','2000'),
+    ('next_leaf_id',           '1'),
+    ('next_condensed_id',      '1');
+
+CREATE VIEW IF NOT EXISTS active_summaries AS
+SELECT id, depth, kind, token_count, earliest_at, latest_at, descendant_count, created_at
+FROM summaries WHERE superseded = 0
+ORDER BY depth DESC, earliest_at ASC;
+
+CREATE VIEW IF NOT EXISTS dag_overview AS
+SELECT depth, COUNT(*) AS total,
+       SUM(CASE WHEN superseded = 0 THEN 1 ELSE 0 END) AS active,
+       SUM(CASE WHEN superseded = 1 THEN 1 ELSE 0 END) AS superseded,
+       SUM(token_count) AS total_tokens
+FROM summaries GROUP BY depth ORDER BY depth;
+
+CREATE VIEW IF NOT EXISTS conversation_stats AS
+SELECT c.id, c.session_key, COUNT(m.id) AS message_count,
+       SUM(m.token_count) AS total_tokens,
+       MIN(m.created_at) AS first_message, MAX(m.created_at) AS last_message
+FROM conversations c LEFT JOIN messages m ON m.conversation_id = c.id GROUP BY c.id;
+"""
+
+
+# ---------------------------------------------------------------------------
+# LLM tool definition for summarization
+# ---------------------------------------------------------------------------
+
+_SUMMARIZE_TOOL = [
     {
         "type": "function",
         "function": {
-            "name": "save_memory",
-            "description": "Save the memory consolidation result to persistent storage.",
+            "name": "save_summary",
+            "description": "Save a summary of conversation messages.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "history_entry": {
+                    "summary": {
                         "type": "string",
-                        "description": "A paragraph summarizing key events/decisions/topics. "
-                        "Start with [YYYY-MM-DD HH:MM]. Include detail useful for grep search.",
-                    },
-                    "memory_update": {
-                        "type": "string",
-                        "description": "Full updated long-term memory as markdown. Include all existing "
-                        "facts plus new ones. Return unchanged if nothing new.",
+                        "description": "A concise summary preserving key decisions, outcomes, "
+                        "entities, errors, timestamps, and tool usage. ~1200 tokens for leaf, "
+                        "~2000 tokens for condensed.",
                     },
                 },
-                "required": ["history_entry", "memory_update"],
+                "required": ["summary"],
             },
         },
     }
 ]
-
-
-def _ensure_text(value: Any) -> str:
-    """Normalize tool-call payload values to text for file storage."""
-    return value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-
-
-def _normalize_save_memory_args(args: Any) -> dict[str, Any] | None:
-    """Normalize provider tool-call arguments to the expected dict shape."""
-    if isinstance(args, str):
-        args = json.loads(args)
-    if isinstance(args, list):
-        return args[0] if args and isinstance(args[0], dict) else None
-    return args if isinstance(args, dict) else None
 
 _TOOL_CHOICE_ERROR_MARKERS = (
     "tool_choice",
@@ -67,164 +182,449 @@ _TOOL_CHOICE_ERROR_MARKERS = (
 
 
 def _is_tool_choice_unsupported(content: str | None) -> bool:
-    """Detect provider errors caused by forced tool_choice being unsupported."""
     text = (content or "").lower()
     return any(m in text for m in _TOOL_CHOICE_ERROR_MARKERS)
 
 
-class MemoryStore:
-    """Two-layer memory: MEMORY.md (long-term facts) + HISTORY.md (grep-searchable log)."""
+def _estimate_tokens(text: str) -> int:
+    """Rough token estimate: ~4 chars per token."""
+    return max(1, len(text) // 4)
 
+
+# ---------------------------------------------------------------------------
+# LCMStore — replaces MemoryStore
+# ---------------------------------------------------------------------------
+
+class LCMStore:
+    """LCM-backed memory: SQLite hierarchical summarization DAG with FTS5."""
+
+    LEAF_MIN_FANOUT = 8
+    CONDENSATION_MIN = 4
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
     def __init__(self, workspace: Path):
-        self.memory_dir = ensure_dir(workspace / "memory")
-        self.memory_file = self.memory_dir / "MEMORY.md"
-        self.history_file = self.memory_dir / "HISTORY.md"
+        self.lcm_dir = ensure_dir(workspace / "lcm")
+        self.db_path = self.lcm_dir / "lcm.db"
         self._consecutive_failures = 0
+        self._init_db()
 
-    def read_long_term(self) -> str:
-        if self.memory_file.exists():
-            return self.memory_file.read_text(encoding="utf-8")
-        return ""
+    def _init_db(self) -> None:
+        """Ensure lcm.db exists with full schema."""
+        db = sqlite3.connect(str(self.db_path))
+        db.executescript(_LCM_SCHEMA)
+        db.close()
 
-    def write_long_term(self, content: str) -> None:
-        self.memory_file.write_text(content, encoding="utf-8")
+    def _connect(self) -> sqlite3.Connection:
+        db = sqlite3.connect(str(self.db_path))
+        db.execute("PRAGMA journal_mode = WAL")
+        db.execute("PRAGMA foreign_keys = ON")
+        return db
 
-    def append_history(self, entry: str) -> None:
-        with open(self.history_file, "a", encoding="utf-8") as f:
-            f.write(entry.rstrip() + "\n\n")
+    def _get_or_create_conversation(self, db: sqlite3.Connection, session_key: str) -> int:
+        """Get conversation ID, creating if needed."""
+        db.execute(
+            "INSERT OR IGNORE INTO conversations (session_key) VALUES (?)",
+            (session_key,),
+        )
+        row = db.execute(
+            "SELECT id FROM conversations WHERE session_key = ?", (session_key,)
+        ).fetchone()
+        return row[0]
+
+    def _get_next_id(self, db: sqlite3.Connection, key: str) -> int:
+        """Get and increment a counter from lcm_config."""
+        row = db.execute("SELECT value FROM lcm_config WHERE key = ?", (key,)).fetchone()
+        val = int(row[0]) if row else 1
+        db.execute(
+            "UPDATE lcm_config SET value = ? WHERE key = ?", (str(val + 1), key)
+        )
+        return val
+
+    # ----- Context retrieval (replaces get_memory_context) -----
 
     def get_memory_context(self) -> str:
-        long_term = self.read_long_term()
-        return f"## Long-term Memory\n{long_term}" if long_term else ""
+        """Build memory context from active (non-superseded) summaries.
+
+        Returns the top-level summaries (highest depth first), giving the LLM
+        a hierarchical view of past conversations.
+        """
+        db = self._connect()
+        try:
+            rows = db.execute(
+                "SELECT id, depth, kind, content, token_count, earliest_at, latest_at "
+                "FROM summaries WHERE superseded = 0 "
+                "ORDER BY depth DESC, earliest_at ASC"
+            ).fetchall()
+            if not rows:
+                return ""
+
+            parts = []
+            total_tokens = 0
+            max_context_tokens = 4000  # budget for memory in system prompt
+
+            for row in rows:
+                sid, depth, kind, content, tokens, earliest, latest = row
+                if total_tokens + tokens > max_context_tokens:
+                    break
+                label = f"[{kind} d{depth}] {earliest[:10]}..{latest[:10]}"
+                parts.append(f"### {label}\n{content}")
+                total_tokens += tokens
+
+            if not parts:
+                return ""
+
+            return "## Long-term Memory (LCM)\n\n" + "\n\n".join(parts)
+        finally:
+            db.close()
+
+    # ----- Message archival -----
+
+    def _archive_messages(
+        self, db: sqlite3.Connection, conv_id: int, messages: list[dict]
+    ) -> list[int]:
+        """Insert messages into lcm.db. Returns list of new message IDs."""
+        row = db.execute(
+            "SELECT COALESCE(MAX(seq), 0) FROM messages WHERE conversation_id = ?",
+            (conv_id,),
+        ).fetchone()
+        seq = row[0]
+        message_ids = []
+
+        for msg in messages:
+            content = msg.get("content", "")
+            if not content or not str(content).strip():
+                continue
+
+            role = msg.get("role", "user")
+            if role not in ("user", "assistant", "system", "tool"):
+                continue
+
+            content_str = str(content)
+            timestamp = msg.get("timestamp", datetime.now().strftime("%Y-%m-%dT%H:%M:%S"))
+
+            tools_used = None
+            if msg.get("tool_calls"):
+                tool_names = [
+                    tc.get("function", {}).get("name", "")
+                    for tc in msg["tool_calls"]
+                    if isinstance(tc, dict) and tc.get("function")
+                ]
+                if tool_names:
+                    tools_used = ",".join(tool_names)
+
+            seq += 1
+            token_count = _estimate_tokens(content_str)
+
+            try:
+                db.execute(
+                    "INSERT INTO messages (conversation_id, seq, role, content, token_count, tools_used, created_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                    (conv_id, seq, role, content_str, token_count, tools_used, timestamp),
+                )
+                msg_id = db.execute("SELECT last_insert_rowid()").fetchone()[0]
+                message_ids.append(msg_id)
+            except sqlite3.IntegrityError:
+                # Duplicate seq — message already archived (e.g., by cron)
+                continue
+
+        db.execute(
+            "UPDATE conversations SET updated_at = strftime('%Y-%m-%dT%H:%M:%S','now') WHERE id = ?",
+            (conv_id,),
+        )
+        return message_ids
+
+    # ----- Leaf compaction -----
+
+    def _get_uncompacted_messages(
+        self, db: sqlite3.Connection, conv_id: int, limit: int
+    ) -> list[tuple]:
+        """Get oldest messages not yet covered by any summary."""
+        return db.execute(
+            "SELECT m.id, m.seq, m.role, m.content, m.created_at "
+            "FROM messages m "
+            "WHERE m.conversation_id = ? "
+            "AND m.id NOT IN (SELECT message_id FROM summary_messages) "
+            "ORDER BY m.seq ASC LIMIT ?",
+            (conv_id, limit),
+        ).fetchall()
+
+    def _count_uncompacted(self, db: sqlite3.Connection, conv_id: int) -> int:
+        return db.execute(
+            "SELECT COUNT(*) FROM messages m "
+            "WHERE m.conversation_id = ? "
+            "AND m.id NOT IN (SELECT message_id FROM summary_messages)",
+            (conv_id,),
+        ).fetchone()[0]
+
+    def _create_leaf_summary(
+        self,
+        db: sqlite3.Connection,
+        conv_id: int,
+        message_rows: list[tuple],
+        summary_text: str,
+    ) -> str:
+        """Insert a leaf summary and link it to source messages."""
+        leaf_id_num = self._get_next_id(db, "next_leaf_id")
+        leaf_id = f"leaf_{leaf_id_num:03d}"
+
+        earliest = message_rows[0][4]  # created_at of first
+        latest = message_rows[-1][4]  # created_at of last
+        token_count = _estimate_tokens(summary_text)
+
+        db.execute(
+            "INSERT INTO summaries (id, conversation_id, depth, kind, content, token_count, earliest_at, latest_at) "
+            "VALUES (?, ?, 0, 'leaf', ?, ?, ?, ?)",
+            (leaf_id, conv_id, summary_text, token_count, earliest, latest),
+        )
+
+        for row in message_rows:
+            db.execute(
+                "INSERT OR IGNORE INTO summary_messages (summary_id, message_id) VALUES (?, ?)",
+                (leaf_id, row[0]),
+            )
+
+        logger.info("LCM leaf compaction: {} covering {} messages", leaf_id, len(message_rows))
+        return leaf_id
+
+    # ----- Condensation -----
+
+    def _get_condensation_candidates(self, db: sqlite3.Connection, conv_id: int) -> tuple[int, list] | None:
+        """Find the lowest depth with >= CONDENSATION_MIN active summaries."""
+        row = db.execute(
+            "SELECT depth, COUNT(*) AS cnt FROM summaries "
+            "WHERE superseded = 0 AND conversation_id = ? "
+            "GROUP BY depth HAVING cnt >= ? ORDER BY depth LIMIT 1",
+            (conv_id, self.CONDENSATION_MIN),
+        ).fetchone()
+        if not row:
+            return None
+
+        depth = row[0]
+        summaries = db.execute(
+            "SELECT id, content, token_count, earliest_at, latest_at FROM summaries "
+            "WHERE superseded = 0 AND depth = ? AND conversation_id = ? "
+            "ORDER BY earliest_at ASC LIMIT ?",
+            (depth, conv_id, self.CONDENSATION_MIN),
+        ).fetchall()
+        return depth, summaries
+
+    def _create_condensed_summary(
+        self,
+        db: sqlite3.Connection,
+        conv_id: int,
+        depth: int,
+        parent_rows: list[tuple],
+        summary_text: str,
+    ) -> str:
+        """Insert a condensed summary and supersede its parents."""
+        cond_id_num = self._get_next_id(db, "next_condensed_id")
+        cond_id = f"condensed_{cond_id_num:03d}"
+
+        new_depth = depth + 1
+        earliest = parent_rows[0][3]
+        latest = parent_rows[-1][4]
+        token_count = _estimate_tokens(summary_text)
+
+        db.execute(
+            "INSERT INTO summaries (id, conversation_id, depth, kind, content, token_count, "
+            "earliest_at, latest_at, descendant_count) VALUES (?, ?, ?, 'condensed', ?, ?, ?, ?, ?)",
+            (cond_id, conv_id, new_depth, summary_text, token_count, earliest, latest,
+             len(parent_rows)),
+        )
+
+        for row in parent_rows:
+            db.execute(
+                "INSERT INTO summary_parents (summary_id, parent_id) VALUES (?, ?)",
+                (cond_id, row[0]),
+            )
+
+        parent_ids = [row[0] for row in parent_rows]
+        placeholders = ",".join("?" * len(parent_ids))
+        db.execute(
+            f"UPDATE summaries SET superseded = 1 WHERE id IN ({placeholders})",
+            parent_ids,
+        )
+
+        logger.info("LCM condensation: {} (depth {}) from {} parents", cond_id, new_depth, len(parent_rows))
+        return cond_id
+
+    # ----- LLM summarization -----
+
+    async def _llm_summarize(
+        self,
+        provider: LLMProvider,
+        model: str,
+        text_to_summarize: str,
+        kind: str,
+    ) -> str | None:
+        """Ask the LLM to produce a summary via tool call."""
+        target = "~1200 tokens" if kind == "leaf" else "~2000 tokens"
+        chat_messages = [
+            {
+                "role": "system",
+                "content": f"You are a memory consolidation agent. Summarize the conversation "
+                f"into {target}. Preserve timestamps, decisions, outcomes, entities, "
+                f"errors, and tool usage. Call the save_summary tool with your summary.",
+            },
+            {"role": "user", "content": text_to_summarize},
+        ]
+
+        try:
+            forced = {"type": "function", "function": {"name": "save_summary"}}
+            response = await provider.chat_with_retry(
+                messages=chat_messages,
+                tools=_SUMMARIZE_TOOL,
+                model=model,
+                tool_choice=forced,
+            )
+
+            if response.finish_reason == "error" and _is_tool_choice_unsupported(response.content):
+                response = await provider.chat_with_retry(
+                    messages=chat_messages,
+                    tools=_SUMMARIZE_TOOL,
+                    model=model,
+                    tool_choice="auto",
+                )
+
+            if not response.has_tool_calls:
+                # Fallback: use content directly if available
+                if response.content and len(response.content.strip()) > 50:
+                    return response.content.strip()
+                logger.warning("LCM summarization: LLM did not call save_summary")
+                return None
+
+            args = response.tool_calls[0].arguments
+            if isinstance(args, str):
+                args = json.loads(args)
+            if isinstance(args, list):
+                args = args[0] if args else {}
+            if isinstance(args, dict):
+                summary = args.get("summary", "")
+                if summary and len(str(summary).strip()) > 20:
+                    return str(summary).strip()
+
+            logger.warning("LCM summarization: empty or invalid summary from LLM")
+            return None
+        except Exception:
+            logger.exception("LCM summarization failed")
+            return None
 
     @staticmethod
-    def _format_messages(messages: list[dict]) -> str:
+    def _format_messages_for_summary(messages: list[dict] | list[tuple]) -> str:
+        """Format messages for LLM summarization prompt."""
         lines = []
-        for message in messages:
-            if not message.get("content"):
-                continue
-            tools = f" [tools: {', '.join(message['tools_used'])}]" if message.get("tools_used") else ""
-            lines.append(
-                f"[{message.get('timestamp', '?')[:16]}] {message['role'].upper()}{tools}: {message['content']}"
-            )
+        for msg in messages:
+            if isinstance(msg, tuple):
+                # (id, seq, role, content, created_at)
+                _, seq, role, content, ts = msg
+                lines.append(f"[{ts[:16]}] {role.upper()}: {content}")
+            else:
+                content = msg.get("content", "")
+                if not content:
+                    continue
+                ts = msg.get("timestamp", "?")[:16]
+                role = msg.get("role", "?").upper()
+                tools = ""
+                if msg.get("tool_calls"):
+                    tool_names = [
+                        tc.get("function", {}).get("name", "")
+                        for tc in msg["tool_calls"]
+                        if isinstance(tc, dict) and tc.get("function")
+                    ]
+                    if tool_names:
+                        tools = f" [tools: {', '.join(tool_names)}]"
+                lines.append(f"[{ts}] {role}{tools}: {content}")
         return "\n".join(lines)
+
+    # ----- Main consolidation entry point -----
 
     async def consolidate(
         self,
         messages: list[dict],
         provider: LLMProvider,
         model: str,
+        session_key: str = "",
     ) -> bool:
-        """Consolidate the provided message chunk into MEMORY.md + HISTORY.md."""
+        """Archive messages to LCM and perform leaf compaction + condensation.
+
+        Called by MemoryConsolidator when context exceeds budget.
+        """
         if not messages:
             return True
 
-        current_memory = self.read_long_term()
-        prompt = f"""Process this conversation and call the save_memory tool with your consolidation.
-
-## Current Long-term Memory
-{current_memory or "(empty)"}
-
-## Conversation to Process
-{self._format_messages(messages)}"""
-
-        chat_messages = [
-            {"role": "system", "content": "You are a memory consolidation agent. Call the save_memory tool with your consolidation of the conversation."},
-            {"role": "user", "content": prompt},
-        ]
-
+        db = self._connect()
         try:
-            forced = {"type": "function", "function": {"name": "save_memory"}}
-            response = await provider.chat_with_retry(
-                messages=chat_messages,
-                tools=_SAVE_MEMORY_TOOL,
-                model=model,
-                tool_choice=forced,
-            )
+            conv_id = self._get_or_create_conversation(db, session_key or "default")
 
-            if response.finish_reason == "error" and _is_tool_choice_unsupported(
-                response.content
-            ):
-                logger.warning("Forced tool_choice unsupported, retrying with auto")
-                response = await provider.chat_with_retry(
-                    messages=chat_messages,
-                    tools=_SAVE_MEMORY_TOOL,
-                    model=model,
-                    tool_choice="auto",
+            # Step 1: Archive messages
+            self._archive_messages(db, conv_id, messages)
+            db.commit()
+
+            # Step 2: Leaf compaction if needed
+            uncompacted_count = self._count_uncompacted(db, conv_id)
+            if uncompacted_count >= self.LEAF_MIN_FANOUT:
+                msg_rows = self._get_uncompacted_messages(db, conv_id, self.LEAF_MIN_FANOUT)
+                if msg_rows:
+                    text = self._format_messages_for_summary(msg_rows)
+                    summary = await self._llm_summarize(provider, model, text, "leaf")
+                    if summary:
+                        self._create_leaf_summary(db, conv_id, msg_rows, summary)
+                        db.commit()
+                    else:
+                        # Fallback: truncated raw text
+                        fallback = text[:2048] + "\n[Truncated for context management]"
+                        self._create_leaf_summary(db, conv_id, msg_rows, fallback)
+                        db.commit()
+
+            # Step 3: Condensation if needed
+            cand = self._get_condensation_candidates(db, conv_id)
+            if cand:
+                depth, parent_rows = cand
+                parent_texts = "\n\n---\n\n".join(
+                    f"[Summary {r[0]}, {r[3][:10]}..{r[4][:10]}]\n{r[1]}" for r in parent_rows
                 )
-
-            if not response.has_tool_calls:
-                logger.warning(
-                    "Memory consolidation: LLM did not call save_memory "
-                    "(finish_reason={}, content_len={}, content_preview={})",
-                    response.finish_reason,
-                    len(response.content or ""),
-                    (response.content or "")[:200],
-                )
-                return self._fail_or_raw_archive(messages)
-
-            args = _normalize_save_memory_args(response.tool_calls[0].arguments)
-            if args is None:
-                logger.warning("Memory consolidation: unexpected save_memory arguments")
-                return self._fail_or_raw_archive(messages)
-
-            if "history_entry" not in args or "memory_update" not in args:
-                logger.warning("Memory consolidation: save_memory payload missing required fields")
-                return self._fail_or_raw_archive(messages)
-
-            entry = args["history_entry"]
-            update = args["memory_update"]
-
-            if entry is None or update is None:
-                logger.warning("Memory consolidation: save_memory payload contains null required fields")
-                return self._fail_or_raw_archive(messages)
-
-            entry = _ensure_text(entry).strip()
-            if not entry:
-                logger.warning("Memory consolidation: history_entry is empty after normalization")
-                return self._fail_or_raw_archive(messages)
-
-            self.append_history(entry)
-            update = _ensure_text(update)
-            if update != current_memory:
-                self.write_long_term(update)
+                summary = await self._llm_summarize(provider, model, parent_texts, "condensed")
+                if summary:
+                    self._create_condensed_summary(db, conv_id, depth, parent_rows, summary)
+                    db.commit()
 
             self._consecutive_failures = 0
-            logger.info("Memory consolidation done for {} messages", len(messages))
+            logger.info("LCM consolidation done: {} messages archived", len(messages))
             return True
         except Exception:
-            logger.exception("Memory consolidation failed")
-            return self._fail_or_raw_archive(messages)
-
-    def _fail_or_raw_archive(self, messages: list[dict]) -> bool:
-        """Increment failure count; after threshold, raw-archive messages and return True."""
-        self._consecutive_failures += 1
-        if self._consecutive_failures < self._MAX_FAILURES_BEFORE_RAW_ARCHIVE:
+            logger.exception("LCM consolidation failed")
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= self._MAX_FAILURES_BEFORE_RAW_ARCHIVE:
+                # Emergency fallback: just archive messages without summarization
+                try:
+                    db2 = self._connect()
+                    conv_id = self._get_or_create_conversation(db2, session_key or "default")
+                    self._archive_messages(db2, conv_id, messages)
+                    db2.commit()
+                    db2.close()
+                    self._consecutive_failures = 0
+                    logger.warning("LCM fallback: raw-archived {} messages", len(messages))
+                    return True
+                except Exception:
+                    logger.exception("LCM fallback archival also failed")
             return False
-        self._raw_archive(messages)
-        self._consecutive_failures = 0
-        return True
+        finally:
+            db.close()
 
-    def _raw_archive(self, messages: list[dict]) -> None:
-        """Fallback: dump raw messages to HISTORY.md without LLM summarization."""
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M")
-        self.append_history(
-            f"[{ts}] [RAW] {len(messages)} messages\n"
-            f"{self._format_messages(messages)}"
-        )
-        logger.warning(
-            "Memory consolidation degraded: raw-archived {} messages", len(messages)
-        )
 
+# Keep MemoryStore as alias for backward compatibility
+MemoryStore = LCMStore
+
+
+# ---------------------------------------------------------------------------
+# MemoryConsolidator — orchestrates when to consolidate
+# ---------------------------------------------------------------------------
 
 class MemoryConsolidator:
     """Owns consolidation policy, locking, and session offset updates."""
 
     _MAX_CONSOLIDATION_ROUNDS = 5
-
-    _SAFETY_BUFFER = 1024  # extra headroom for tokenizer estimation drift
+    _SAFETY_BUFFER = 1024
 
     def __init__(
         self,
@@ -237,7 +637,7 @@ class MemoryConsolidator:
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         max_completion_tokens: int = 4096,
     ):
-        self.store = MemoryStore(workspace)
+        self.store = LCMStore(workspace)
         self.provider = provider
         self.model = model
         self.sessions = sessions
@@ -251,9 +651,11 @@ class MemoryConsolidator:
         """Return the shared consolidation lock for one session."""
         return self._locks.setdefault(session_key, asyncio.Lock())
 
-    async def consolidate_messages(self, messages: list[dict[str, object]]) -> bool:
-        """Archive a selected message chunk into persistent memory."""
-        return await self.store.consolidate(messages, self.provider, self.model)
+    async def consolidate_messages(
+        self, messages: list[dict[str, object]], session_key: str = ""
+    ) -> bool:
+        """Archive a selected message chunk into LCM."""
+        return await self.store.consolidate(messages, self.provider, self.model, session_key)
 
     def pick_consolidation_boundary(
         self,
@@ -294,21 +696,17 @@ class MemoryConsolidator:
             self._get_tool_definitions(),
         )
 
-    async def archive_messages(self, messages: list[dict[str, object]]) -> bool:
-        """Archive messages with guaranteed persistence (retries until raw-dump fallback)."""
+    async def archive_messages(self, messages: list[dict[str, object]], session_key: str = "") -> bool:
+        """Archive messages with guaranteed persistence."""
         if not messages:
             return True
         for _ in range(self.store._MAX_FAILURES_BEFORE_RAW_ARCHIVE):
-            if await self.consolidate_messages(messages):
+            if await self.consolidate_messages(messages, session_key):
                 return True
         return True
 
     async def maybe_consolidate_by_tokens(self, session: Session) -> None:
-        """Loop: archive old messages until prompt fits within safe budget.
-
-        The budget reserves space for completion tokens and a safety buffer
-        so the LLM request never exceeds the context window.
-        """
+        """Loop: archive old messages until prompt fits within safe budget."""
         if not session.messages or self.context_window_tokens <= 0:
             return
 
@@ -356,7 +754,7 @@ class MemoryConsolidator:
                     source,
                     len(chunk),
                 )
-                if not await self.consolidate_messages(chunk):
+                if not await self.consolidate_messages(chunk, session.key):
                     return
                 session.last_consolidated = end_idx
                 self.sessions.save(session)
