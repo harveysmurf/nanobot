@@ -85,6 +85,9 @@ class WebhookChannel(BaseChannel):
 
         app = web.Application()
         app.router.add_post(path, self._on_request)
+        # Also listen on /webhook for HA Webhook Conversation compatibility
+        if path != "/webhook":
+            app.router.add_post("/webhook", self._on_request)
 
         self._runner = web.AppRunner(app)
         await self._runner.setup()
