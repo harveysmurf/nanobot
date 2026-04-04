@@ -27,7 +27,12 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 
 
-_VOICE_TAG = "[Voice command via Home Assistant]"
+_VOICE_TAG = (
+    "[Voice command via Home Assistant]\n"
+    "RULES: This is spoken via TTS. Reply in 1-2 short sentences only. "
+    "No markdown, no asterisks, no bullet points, no emojis, no formatting. "
+    "Use plain text only. Respond in the SAME LANGUAGE the user spoke."
+)
 
 
 class WebhookChannel(BaseChannel):
