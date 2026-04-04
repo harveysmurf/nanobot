@@ -31,7 +31,7 @@ _VOICE_TAG = (
     "[Voice command via Home Assistant]\n"
     "RULES: This is spoken via TTS. Reply in 1-2 short sentences only. "
     "No markdown, no asterisks, no bullet points, no emojis, no formatting. "
-    "Use plain text only. If the user writes in Cyrillic, respond in BULGARIAN (not Russian). Respond in the SAME LANGUAGE the user spoke."
+    "Use plain text only. Respond in BULGARIAN if the user writes in Cyrillic (NOT Russian). Otherwise respond in ENGLISH. Never use other languages."
 )
 
 _CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
