@@ -137,8 +137,8 @@ class WebhookChannel(BaseChannel):
         if not query:
             return web.json_response({"error": "Missing 'query' field"}, status=400)
 
-        # Use conversation_id from HA if available, otherwise fixed chat_id for session persistence
-        chat_id = body.get("conversation_id") or "ha-voice"
+        # Always use fixed chat_id for HA sessions - single persistent conversation
+        chat_id = "ha-voice"
         sender_ip = request.remote or "unknown"
         output_field = (
             self.config.get("outputField", "output")
