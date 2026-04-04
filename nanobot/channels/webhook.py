@@ -16,6 +16,7 @@ Request-response flow:
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
 from typing import Any
 
@@ -34,6 +35,15 @@ _VOICE_TAG = (
     "Use plain text only. Respond in the SAME LANGUAGE the user spoke."
 )
 
+_CYRILLIC_RE = re.compile(r"[\u0400-\u04FF]")
+
+
+def _detect_lang(text: str) -> str:
+    """Detect language from text: Cyrillic-heavy -> 'bg', otherwise 'en'."""
+    cyrillic = len(_CYRILLIC_RE.findall(text))
+    latin = len(re.findall(r"[a-zA-Z]", text))
+    return "bg" if cyrillic > latin else "en"
+
 
 class WebhookChannel(BaseChannel):
     """HTTP webhook channel with synchronous request-response semantics."""
@@ -45,6 +55,8 @@ class WebhookChannel(BaseChannel):
         super().__init__(config, bus)
         # Pending request futures keyed by chat_id
         self._pending: dict[str, asyncio.Future[str]] = {}
+        # Detected language per chat_id, used to tag the response for TTS
+        self._lang: dict[str, str] = {}
         self._runner: web.AppRunner | None = None
 
     def is_allowed(self, sender_id: str) -> bool:
@@ -149,6 +161,10 @@ class WebhookChannel(BaseChannel):
             if key in body:
                 metadata[key] = body[key]
 
+        # Detect language from the user's query for TTS voice selection
+        detected_lang = _detect_lang(query)
+        self._lang[chat_id] = detected_lang
+
         content = f"{_VOICE_TAG}\n{query}"
 
         # Create a future to wait for the agent's response
@@ -179,6 +195,11 @@ class WebhookChannel(BaseChannel):
             )
         finally:
             self._pending.pop(chat_id, None)
+            lang = self._lang.pop(chat_id, None)
+
+        # Prepend [lang:xx] tag so Smart TTS can pick the right voice
+        if lang:
+            response_text = f"[lang:{lang}]{response_text}"
 
         return web.json_response({output_field: response_text})
 
