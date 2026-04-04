@@ -27,12 +27,7 @@ from nanobot.bus.queue import MessageBus
 from nanobot.channels.base import BaseChannel
 
 
-# Language-code prefix → human-readable instruction for the agent
-_LANG_INSTRUCTIONS = {
-    "bg": "[Voice command via Home Assistant — respond in Bulgarian]",
-    "en": "[Voice command via Home Assistant — respond in English]",
-}
-_DEFAULT_VOICE_TAG = "[Voice command via Home Assistant]"
+_VOICE_TAG = "[Voice command via Home Assistant]"
 
 
 class WebhookChannel(BaseChannel):
@@ -149,12 +144,7 @@ class WebhookChannel(BaseChannel):
             if key in body:
                 metadata[key] = body[key]
 
-        # Prepend a language-aware voice tag so the agent knows to respond
-        # in the same language the user spoke
-        language = body.get("language", "")
-        lang_prefix = language.split("-")[0].lower() if language else ""
-        voice_tag = _LANG_INSTRUCTIONS.get(lang_prefix, _DEFAULT_VOICE_TAG)
-        content = f"{voice_tag}\n{query}"
+        content = f"{_VOICE_TAG}\n{query}"
 
         # Create a future to wait for the agent's response
         loop = asyncio.get_running_loop()
