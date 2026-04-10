@@ -47,7 +47,7 @@ class Nanobot:
                 ``~/.nanobot/config.json``.
             workspace: Override the workspace directory from config.
         """
-        from nanobot.config.loader import load_config, resolve_config_env_vars
+        from nanobot.config.loader import load_config
         from nanobot.config.schema import Config
 
         resolved: Path | None = None
@@ -56,7 +56,7 @@ class Nanobot:
             if not resolved.exists():
                 raise FileNotFoundError(f"Config not found: {resolved}")
 
-        config: Config = resolve_config_env_vars(load_config(resolved))
+        config: Config = load_config(resolved)
         if workspace is not None:
             config.agents.defaults.workspace = str(
                 Path(workspace).expanduser().resolve()
@@ -76,12 +76,12 @@ class Nanobot:
             context_block_limit=defaults.context_block_limit,
             max_tool_result_chars=defaults.max_tool_result_chars,
             provider_retry_mode=defaults.provider_retry_mode,
-            web_config=config.tools.web,
+            web_search_config=config.tools.web.search,
+            web_proxy=config.tools.web.proxy or None,
             exec_config=config.tools.exec,
             restrict_to_workspace=config.tools.restrict_to_workspace,
             mcp_servers=config.tools.mcp_servers,
             timezone=defaults.timezone,
-            unified_session=defaults.unified_session,
         )
         return cls(loop)
 
