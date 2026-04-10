@@ -590,7 +590,6 @@ def serve(
         mcp_servers=runtime_config.tools.mcp_servers,
         channels_config=runtime_config.channels,
         timezone=runtime_config.agents.defaults.timezone,
-        unified_session=runtime_config.agents.defaults.unified_session,
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -682,19 +681,14 @@ def gateway(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
-        unified_session=config.agents.defaults.unified_session,
     )
 
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
-        # Dream is an internal job — run directly, not through the agent loop.
+        # Dream/LCM consolidation — skip, handled by LCM automatically.
         if job.name == "dream":
-            try:
-                await agent.dream.run()
-                logger.info("Dream cron job completed")
-            except Exception:
-                logger.exception("Dream cron job failed")
+            logger.info("Dream cron job skipped (LCM handles consolidation)")
             return None
 
         from nanobot.agent.tools.cron import CronTool
@@ -914,7 +908,6 @@ def agent(
         mcp_servers=config.tools.mcp_servers,
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
-        unified_session=config.agents.defaults.unified_session,
     )
     restart_notice = consume_restart_notice_from_env()
     if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):

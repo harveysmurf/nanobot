@@ -70,9 +70,12 @@ This happens approximately **once a week**, but the timing depends on when featu
 Keep setup boring and reliable. The goal is to get you into the code quickly:
 
 ```bash
-# Clone the repository
-git clone https://github.com/HKUDS/nanobot.git
+# Clone your fork
+git clone https://github.com/harveysmurf/nanobot.git
 cd nanobot
+
+# Add upstream (to sync with main repo)
+git remote add upstream https://github.com/HKUDS/nanobot.git
 
 # Install with dev dependencies
 pip install -e ".[dev]"
@@ -86,6 +89,47 @@ ruff check nanobot/
 # Format code
 ruff format nanobot/
 ```
+
+## Pull Request Workflow
+
+**ALWAYS open a PR first, never push directly to main.**
+
+### Steps
+
+1. **Create a branch** from `main`:
+   ```bash
+   git checkout main
+   git checkout -b bugfix/your-fix
+   # or for features:
+   git checkout -b feature/your-feature
+   ```
+
+2. **Make your changes** and commit:
+   ```bash
+   git add .
+   git commit -m "description of change"
+   ```
+
+3. **Push to your fork** (do NOT push to upstream):
+   ```bash
+   git push origin bugfix/your-fix
+   ```
+
+4. **Open a PR** via GitHub UI or API:
+   ```bash
+   # Via GitHub CLI (if available)
+   gh pr create --base main --head your-branch
+
+   # Or open in browser:
+   # https://github.com/harveysmurf/nanobot/pull/new/your-branch
+   ```
+
+### Rules
+
+- **Never push directly to `main`** — all changes go through PRs
+- **Target `main`** for bug fixes and docs
+- **Target `nightly`** (on upstream HKUDS) for new features
+- Write clear PR titles and descriptions
 
 ## Code Style
 
