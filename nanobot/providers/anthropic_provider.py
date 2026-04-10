@@ -11,6 +11,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import json_repair
+from loguru import logger
 
 from nanobot.providers.base import LLMProvider, LLMResponse, ToolCallRequest
 
@@ -48,65 +49,7 @@ class AnthropicProvider(LLMProvider):
             client_kw["base_url"] = api_base
         if extra_headers:
             client_kw["default_headers"] = extra_headers
-        # Keep retries centralized in LLMProvider._run_with_retry to avoid retry amplification.
-        client_kw["max_retries"] = 0
         self._client = AsyncAnthropic(**client_kw)
-
-    @classmethod
-    def _handle_error(cls, e: Exception) -> LLMResponse:
-        response = getattr(e, "response", None)
-        headers = getattr(response, "headers", None)
-        payload = (
-            getattr(e, "body", None)
-            or getattr(e, "doc", None)
-            or getattr(response, "text", None)
-        )
-        if payload is None and response is not None:
-            response_json = getattr(response, "json", None)
-            if callable(response_json):
-                try:
-                    payload = response_json()
-                except Exception:
-                    payload = None
-        payload_text = payload if isinstance(payload, str) else str(payload) if payload is not None else ""
-        msg = f"Error: {payload_text.strip()[:500]}" if payload_text.strip() else f"Error calling LLM: {e}"
-        retry_after = cls._extract_retry_after_from_headers(headers)
-        if retry_after is None:
-            retry_after = LLMProvider._extract_retry_after(msg)
-
-        status_code = getattr(e, "status_code", None)
-        if status_code is None and response is not None:
-            status_code = getattr(response, "status_code", None)
-
-        should_retry: bool | None = None
-        if headers is not None:
-            raw = headers.get("x-should-retry")
-            if isinstance(raw, str):
-                lowered = raw.strip().lower()
-                if lowered == "true":
-                    should_retry = True
-                elif lowered == "false":
-                    should_retry = False
-
-        error_kind: str | None = None
-        error_name = e.__class__.__name__.lower()
-        if "timeout" in error_name:
-            error_kind = "timeout"
-        elif "connection" in error_name:
-            error_kind = "connection"
-        error_type, error_code = LLMProvider._extract_error_type_code(payload)
-
-        return LLMResponse(
-            content=msg,
-            finish_reason="error",
-            retry_after=retry_after,
-            error_status_code=int(status_code) if status_code is not None else None,
-            error_kind=error_kind,
-            error_type=error_type,
-            error_code=error_code,
-            error_retry_after_s=retry_after,
-            error_should_retry=should_retry,
-        )
 
     @staticmethod
     def _strip_prefix(model: str) -> str:
@@ -310,9 +253,8 @@ class AnthropicProvider(LLMProvider):
     # Prompt caching
     # ------------------------------------------------------------------
 
-    @classmethod
+    @staticmethod
     def _apply_cache_control(
-        cls,
         system: str | list[dict[str, Any]],
         messages: list[dict[str, Any]],
         tools: list[dict[str, Any]] | None,
@@ -339,8 +281,7 @@ class AnthropicProvider(LLMProvider):
         new_tools = tools
         if tools:
             new_tools = list(tools)
-            for idx in cls._tool_cache_marker_indices(new_tools):
-                new_tools[idx] = {**new_tools[idx], "cache_control": marker}
+            new_tools[-1] = {**new_tools[-1], "cache_control": marker}
 
         return system, new_msgs, new_tools
 
@@ -380,15 +321,9 @@ class AnthropicProvider(LLMProvider):
         if system:
             kwargs["system"] = system
 
-        if reasoning_effort == "adaptive":
-            # Adaptive thinking: model decides when and how much to think
-            # Supported on claude-sonnet-4-6 and claude-opus-4-6.
-            # Also auto-enables interleaved thinking between tool calls.
-            kwargs["thinking"] = {"type": "adaptive"}
-            kwargs["temperature"] = 1.0
-        elif thinking_enabled:
+        if thinking_enabled:
             budget_map = {"low": 1024, "medium": 4096, "high": max(8192, max_tokens)}
-            budget = budget_map.get(reasoning_effort.lower(), 4096)
+            budget = budget_map.get(reasoning_effort.lower(), 4096)  # type: ignore[union-attr]
             kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
             kwargs["max_tokens"] = max(max_tokens, budget + 4096)
             kwargs["temperature"] = 1.0
@@ -484,7 +419,7 @@ class AnthropicProvider(LLMProvider):
             response = await self._client.messages.create(**kwargs)
             return self._parse_response(response)
         except Exception as e:
-            return self._handle_error(e)
+            return LLMResponse(content=f"Error calling LLM: {e}", finish_reason="error")
 
     async def chat_stream(
         self,
@@ -527,10 +462,9 @@ class AnthropicProvider(LLMProvider):
                     f"{idle_timeout_s} seconds"
                 ),
                 finish_reason="error",
-                error_kind="timeout",
             )
         except Exception as e:
-            return self._handle_error(e)
+            return LLMResponse(content=f"Error calling LLM: {e}", finish_reason="error")
 
     def get_default_model(self) -> str:
         return self.default_model
