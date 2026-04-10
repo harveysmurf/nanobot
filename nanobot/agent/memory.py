@@ -240,30 +240,53 @@ class LCMStore:
         )
         return val
 
-    # ----- Context retrieval (replaces get_memory_context) -----
-
-    def get_memory_context(self) -> str:
+    def get_memory_context(self, session_key: str | None = None) -> str:
         """Build memory context from active (non-superseded) summaries.
 
-        Returns the top-level summaries (highest depth first), giving the LLM
-        a hierarchical view of past conversations.
+        Returns summaries from all conversations (or the specific session_key if
+        provided), ordered depth-descending for hierarchical context. This gives
+        the LLM a rich view of past interactions beyond recent session messages.
+        
+        If session_key is provided, loads summaries from that conversation's
+        context plus high-level summaries from other conversations.
         """
         db = self._connect()
         try:
-            rows = db.execute(
-                "SELECT id, depth, kind, content, token_count, earliest_at, latest_at "
-                "FROM summaries WHERE superseded = 0 "
-                "ORDER BY depth DESC, earliest_at ASC"
-            ).fetchall()
+            # Load all summaries, not just a budget-limited slice.
+            # The LLM needs to see what's available so it can ask to expand
+            # specific topics via FTS if needed.
+            if session_key:
+                # Specific session: load its summaries + global context
+                rows = db.execute(
+                    "SELECT s.id, s.depth, s.kind, s.content, s.token_count, "
+                    "s.earliest_at, s.latest_at, s.conversation_id "
+                    "FROM summaries s "
+                    "JOIN conversations c ON c.id = s.conversation_id "
+                    "WHERE s.superseded = 0 "
+                    "AND (c.session_key = ? OR s.depth >= 1) "
+                    "ORDER BY s.depth DESC, s.earliest_at ASC",
+                    (session_key,),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT id, depth, kind, content, token_count, "
+                    "earliest_at, latest_at, conversation_id "
+                    "FROM summaries WHERE superseded = 0 "
+                    "ORDER BY depth DESC, earliest_at ASC"
+                ).fetchall()
+            
             if not rows:
                 return ""
 
             parts = []
             total_tokens = 0
-            max_context_tokens = 4000  # budget for memory in system prompt
+            # Generous budget — summaries are pre-compressed summaries of
+            # already-archived messages. Better to include more than to miss
+            # relevant context and appear amnesiac.
+            max_context_tokens = 12000
 
             for row in rows:
-                sid, depth, kind, content, tokens, earliest, latest = row
+                sid, depth, kind, content, tokens, earliest, latest, conv_id = row
                 if total_tokens + tokens > max_context_tokens:
                     break
                 label = f"[{kind} d{depth}] {earliest[:10]}..{latest[:10]}"
