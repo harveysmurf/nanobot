@@ -649,6 +649,11 @@ def gateway(
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
+        # Dream/LCM consolidation — skip, handled by LCM automatically.
+        if job.name == "dream":
+            logger.info("Dream cron job skipped (LCM handles consolidation)")
+            return None
+
         from nanobot.agent.tools.cron import CronTool
         from nanobot.agent.tools.message import MessageTool
         from nanobot.utils.evaluator import evaluate_response
