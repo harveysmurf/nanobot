@@ -42,7 +42,6 @@ class AgentDefaults(Base):
     temperature: float = 0.1
     max_tool_iterations: int = 200
     max_tool_result_chars: int = 16_000
-    session_history_max_messages: int = 10  # Number of unconsolidated session messages to load into context (0 = disabled)
     provider_retry_mode: Literal["standard", "persistent"] = "standard"
     reasoning_effort: str | None = None  # low / medium / high - enables LLM thinking mode
     timezone: str = "UTC"  # IANA timezone, e.g. "Asia/Shanghai", "America/New_York"
