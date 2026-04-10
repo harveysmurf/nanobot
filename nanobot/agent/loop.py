@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import re
 import os
@@ -39,6 +40,8 @@ if TYPE_CHECKING:
     from nanobot.config.schema import ChannelsConfig, ExecToolConfig, WebSearchConfig
     from nanobot.cron.service import CronService
 
+
+UNIFIED_SESSION_KEY = "unified:default"
 
 class _LoopHook(AgentHook):
     """Core hook for the main loop."""
@@ -181,6 +184,7 @@ class AgentLoop:
         channels_config: ChannelsConfig | None = None,
         timezone: str | None = None,
         hooks: list[AgentHook] | None = None,
+        unified_session: bool = False,
     ):
         from nanobot.config.schema import ExecToolConfig, WebSearchConfig
 
@@ -230,6 +234,7 @@ class AgentLoop:
             restrict_to_workspace=restrict_to_workspace,
         )
 
+        self._unified_session = unified_session
         self._running = False
         self._mcp_servers = mcp_servers or {}
         self._mcp_stack: AsyncExitStack | None = None
