@@ -170,7 +170,6 @@ class AgentLoop:
         context_window_tokens: int | None = None,
         context_block_limit: int | None = None,
         max_tool_result_chars: int | None = None,
-        session_history_max_messages: int | None = None,
         provider_retry_mode: str = "standard",
         web_search_config: WebSearchConfig | None = None,
         web_proxy: str | None = None,
@@ -204,11 +203,6 @@ class AgentLoop:
             max_tool_result_chars
             if max_tool_result_chars is not None
             else defaults.max_tool_result_chars
-        )
-        self.session_history_max_messages = (
-            session_history_max_messages
-            if session_history_max_messages is not None
-            else defaults.session_history_max_messages
         )
         self.provider_retry_mode = provider_retry_mode
         self.web_search_config = web_search_config or WebSearchConfig()
@@ -530,7 +524,7 @@ class AgentLoop:
                 self.sessions.save(session)
             await self.memory_consolidator.maybe_consolidate_by_tokens(session)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
-            history = session.get_history(max_messages=self.session_history_max_messages)
+            history = session.get_history(max_messages=0)
             current_role = "assistant" if msg.sender_id == "subagent" else "user"
             messages = self.context.build_messages(
                 history=history,
@@ -569,7 +563,7 @@ class AgentLoop:
             if isinstance(message_tool, MessageTool):
                 message_tool.start_turn()
 
-        history = session.get_history(max_messages=self.session_history_max_messages)
+        history = session.get_history(max_messages=0)
         initial_messages = self.context.build_messages(
             history=history,
             current_message=msg.content,
