@@ -2,20 +2,12 @@
 
 from typing import TYPE_CHECKING, Any
 
-from nanobot.agent.tools.base import Tool, tool_parameters
-from nanobot.agent.tools.schema import StringSchema, tool_parameters_schema
+from nanobot.agent.tools.base import Tool
 
 if TYPE_CHECKING:
     from nanobot.agent.subagent import SubagentManager
 
 
-@tool_parameters(
-    tool_parameters_schema(
-        task=StringSchema("The task for the subagent to complete"),
-        label=StringSchema("Optional short label for the task (for display)"),
-        required=["task"],
-    )
-)
 class SpawnTool(Tool):
     """Tool to spawn a subagent for background task execution."""
 
@@ -44,6 +36,23 @@ class SpawnTool(Tool):
             "For deliverables or existing projects, inspect the workspace first "
             "and use a dedicated subdirectory when helpful."
         )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "The task for the subagent to complete",
+                },
+                "label": {
+                    "type": "string",
+                    "description": "Optional short label for the task (for display)",
+                },
+            },
+            "required": ["task"],
+        }
 
     async def execute(self, task: str, label: str | None = None, **kwargs: Any) -> str:
         """Spawn a subagent to execute the given task."""
