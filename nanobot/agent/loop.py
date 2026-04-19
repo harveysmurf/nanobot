@@ -228,7 +228,7 @@ class AgentLoop:
             asyncio.Semaphore(_max) if _max > 0 else None
         )
         self.memory_consolidator = self.consolidator = MemoryConsolidator(
-            store=self.context.memory,
+            workspace=workspace,
             provider=provider,
             model=self.model,
             sessions=self.sessions,
@@ -243,6 +243,19 @@ class AgentLoop:
             session_ttl_minutes=session_ttl_minutes,
         )
         # Dream replaced by LCM — consolidation handled by MemoryConsolidator
+        self._register_default_tools()
+        if _tc.my.enable:
+            self.tools.register(MyTool(loop=self, modify_allowed=_tc.my.allow_set))
+        self._runtime_vars: dict[str, Any] = {}
+        self._current_iteration: int = 0
+        self.commands = CommandRouter()
+        register_builtin_commands(self.commands)
+
+    def _register_default_tools(self) -> None:
+        """Register the default set of tools."""
+        allowed_dir = (
+            self.workspace if (self.restrict_to_workspace or self.exec_config.sandbox) else None
+        )
         extra_read = [BUILTIN_SKILLS_DIR] if allowed_dir else None
         self.tools.register(
             ReadFileTool(
