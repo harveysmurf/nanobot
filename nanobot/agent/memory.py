@@ -709,7 +709,7 @@ class MemoryConsolidator:
         max_completion_tokens: int = 4096,
         store = None,
     ):
-        self.store = LCMStore(workspace)
+        self.store = LCMStore(workspace) if isinstance(workspace, Path) else store
         self.provider = provider
         self.model = model
         self.sessions = sessions
