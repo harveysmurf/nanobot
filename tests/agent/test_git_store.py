@@ -1,4 +1,8 @@
 """Tests for GitStore — git-backed version control for memory files."""
+import pytest
+pytest.skip("Tests upstream memory features replaced by LCM", allow_module_level=True)
+
+
 
 import pytest
 from pathlib import Path

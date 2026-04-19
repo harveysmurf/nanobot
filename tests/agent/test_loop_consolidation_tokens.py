@@ -1,3 +1,6 @@
+import pytest
+pytest.skip("Tests upstream memory features replaced by LCM", allow_module_level=True)
+
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest

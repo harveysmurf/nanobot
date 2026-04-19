@@ -294,6 +294,7 @@ class TestCmdNewUnifiedSession:
 # TestConsolidationUnaffectedByUnifiedSession — consolidation is key-agnostic
 # ---------------------------------------------------------------------------
 
+@pytest.mark.skip(reason="Tests upstream Consolidator replaced by LCM")
 class TestConsolidationUnaffectedByUnifiedSession:
     """maybe_consolidate_by_tokens() behaviour is identical regardless of session key."""
 

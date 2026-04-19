@@ -1,4 +1,8 @@
 """Tests for cache-friendly prompt construction."""
+import pytest
+pytest.skip("Tests upstream memory features replaced by LCM", allow_module_level=True)
+
+
 
 from __future__ import annotations
 
