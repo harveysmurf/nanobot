@@ -69,6 +69,7 @@ class AgentRunResult:
     tools_used: list[str] = field(default_factory=list)
     usage: dict[str, int] = field(default_factory=dict)
     stop_reason: str = "completed"
+    had_injections: bool = False
     error: str | None = None
     tool_events: list[dict[str, str]] = field(default_factory=list)
 
