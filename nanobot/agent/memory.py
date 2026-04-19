@@ -203,6 +203,8 @@ class LCMStore:
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
     def __init__(self, workspace: Path):
+        # no-op for upstream compat
+
         self.lcm_dir = ensure_dir(workspace / "lcm")
         self.db_path = self.lcm_dir / "lcm.db"
         self._consecutive_failures = 0
@@ -659,6 +661,10 @@ class LCMStore:
         pass
 
 
+    @property
+    def git(self):
+        return None
+
     def read_memory(self) -> str:
         return self.get_memory_context()
 
@@ -699,6 +705,7 @@ class MemoryConsolidator:
         build_messages: Callable[..., list[dict[str, Any]]],
         get_tool_definitions: Callable[[], list[dict[str, Any]]],
         max_completion_tokens: int = 4096,
+        store = None,
     ):
         self.store = LCMStore(workspace)
         self.provider = provider
