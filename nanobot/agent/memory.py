@@ -635,6 +635,46 @@ class LCMStore:
             db.close()
 
 
+
+
+
+
+
+
+
+
+        """Upstream compat stub."""
+        return self.get_memory_context()
+
+        """Upstream compat stub."""
+        return 0
+
+        """Upstream compat stub."""
+        return []
+
+        """Upstream compat stub."""
+        return 0
+
+        """Upstream compat stub."""
+        pass
+
+
+    def read_memory(self) -> str:
+        return self.get_memory_context()
+
+    def append_history(self, entry: str) -> int:
+        return 0
+
+    def read_unprocessed_history(self, since_cursor: int = 0) -> list:
+        return []
+
+    def get_last_dream_cursor(self) -> int:
+        return 0
+
+    def set_last_dream_cursor(self, cursor: int) -> None:
+        pass
+
+
 # Keep MemoryStore as alias for backward compatibility
 MemoryStore = LCMStore
 
@@ -785,3 +825,16 @@ class MemoryConsolidator:
                 estimated, source = self.estimate_session_prompt_tokens(session)
                 if estimated <= 0:
                     return
+
+
+# Aliases for upstream compatibility
+Consolidator = MemoryConsolidator
+
+
+class Dream:
+    """Stub -- LCM handles consolidation."""
+    async def run(self): pass
+    model = None
+    max_batch_size = 5
+    max_iterations = 3
+    annotate_line_ages = False
