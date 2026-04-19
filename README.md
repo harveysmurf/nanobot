@@ -1790,6 +1790,25 @@ nanobot/
 └── cli/            # 🖥️ Commands
 ```
 
+## 🧪 Evaluation
+
+Eval framework lives in a separate repo: [harveysmurf/nanobot-eval](https://github.com/harveysmurf/nanobot-eval)
+
+Runs automatically on push/PR to main via a self-hosted GitHub Actions runner.
+
+```bash
+# Run eval manually against a commit
+python3 run_eval.py --sha af16a35
+
+# Score results
+python3 scorer.py results/<sha>_<ts>.json -d ~/nanobot-dev
+
+# Compare against baseline
+python3 compare.py baseline_scored.json results/<sha>_<ts>_scored.json
+```
+
+**How it works:** Builds a Docker image from any git SHA, runs prompt suites (basic, memory, tools, safety) in isolated containers, scores with LLM-as-judge using nanobot's own provider framework. See [nanobot-eval README](https://github.com/harveysmurf/nanobot-eval) for details.
+
 ## 🤝 Contribute & Roadmap
 
 PRs welcome! The codebase is intentionally small and readable. 🤗
