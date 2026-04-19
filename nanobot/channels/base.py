@@ -22,7 +22,9 @@ class BaseChannel(ABC):
 
     name: str = "base"
     display_name: str = "Base"
+    transcription_provider: str = "groq"
     transcription_api_key: str = ""
+    transcription_api_base: str = ""
 
     def __init__(self, config: Any, bus: MessageBus):
         """
@@ -37,13 +39,22 @@ class BaseChannel(ABC):
         self._running = False
 
     async def transcribe_audio(self, file_path: str | Path) -> str:
-        """Transcribe an audio file via Groq Whisper. Returns empty string on failure."""
+        """Transcribe an audio file via Whisper (OpenAI or Groq). Returns empty string on failure."""
         if not self.transcription_api_key:
             return ""
         try:
-            from nanobot.providers.transcription import GroqTranscriptionProvider
-
-            provider = GroqTranscriptionProvider(api_key=self.transcription_api_key)
+            if self.transcription_provider == "openai":
+                from nanobot.providers.transcription import OpenAITranscriptionProvider
+                provider = OpenAITranscriptionProvider(
+                    api_key=self.transcription_api_key,
+                    api_base=self.transcription_api_base or None,
+                )
+            else:
+                from nanobot.providers.transcription import GroqTranscriptionProvider
+                provider = GroqTranscriptionProvider(
+                    api_key=self.transcription_api_key,
+                    api_base=self.transcription_api_base or None,
+                )
             return await provider.transcribe(file_path)
         except Exception as e:
             logger.warning("{}: audio transcription failed: {}", self.name, e)
@@ -112,7 +123,13 @@ class BaseChannel(ABC):
 
     def is_allowed(self, sender_id: str) -> bool:
         """Check if *sender_id* is permitted.  Empty list → deny all; ``"*"`` → allow all."""
-        allow_list = getattr(self.config, "allow_from", [])
+        if isinstance(self.config, dict):
+            if "allow_from" in self.config:
+                allow_list = self.config.get("allow_from")
+            else:
+                allow_list = self.config.get("allowFrom", [])
+        else:
+            allow_list = getattr(self.config, "allow_from", [])
         if not allow_list:
             logger.warning("{}: allow_from is empty — all access denied", self.name)
             return False

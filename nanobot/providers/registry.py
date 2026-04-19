@@ -200,6 +200,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         env_key="OPENAI_API_KEY",
         display_name="OpenAI",
         backend="openai_compat",
+        supports_max_completion_tokens=True,
     ),
     # OpenAI Codex: OAuth-based, dedicated provider
     ProviderSpec(
@@ -279,6 +280,15 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         backend="openai_compat",
         default_api_base="https://api.minimax.io/v1",
     ),
+    # MiniMax Anthropic-compatible endpoint: supports thinking mode
+    ProviderSpec(
+        name="minimax_anthropic",
+        keywords=("minimax_anthropic",),
+        env_key="MINIMAX_API_KEY",
+        display_name="MiniMax (Anthropic)",
+        backend="anthropic",
+        default_api_base="https://api.minimax.io/anthropic",
+    ),
     # Mistral AI: OpenAI-compatible API
     ProviderSpec(
         name="mistral",
@@ -296,6 +306,15 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         display_name="Step Fun",
         backend="openai_compat",
         default_api_base="https://api.stepfun.com/v1",
+    ),
+    # Xiaomi MIMO (小米): OpenAI-compatible API
+    ProviderSpec(
+        name="xiaomi_mimo",
+        keywords=("xiaomi_mimo", "mimo"),
+        env_key="XIAOMIMIMO_API_KEY",
+        display_name="Xiaomi MIMO",
+        backend="openai_compat",
+        default_api_base="https://api.xiaomimimo.com/v1",
     ),
     # === Local deployment (matched by config key, NOT by api_base) =========
     # vLLM / any OpenAI-compatible local server
@@ -318,6 +337,17 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         detect_by_base_keyword="11434",
         default_api_base="http://localhost:11434/v1",
     ),
+    # LM Studio (local, OpenAI-compatible)
+    ProviderSpec(
+        name="lm_studio",
+        keywords=("lm-studio", "lmstudio", "lm_studio"),
+        env_key="LM_STUDIO_API_KEY",
+        display_name="LM Studio",
+        backend="openai_compat",
+        is_local=True,
+        detect_by_base_keyword="1234",
+        default_api_base="http://localhost:1234/v1",
+    ),
     # === OpenVINO Model Server (direct, local, OpenAI-compatible at /v3) ===
     ProviderSpec(
         name="ovms",
@@ -338,6 +368,15 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         display_name="Groq",
         backend="openai_compat",
         default_api_base="https://api.groq.com/openai/v1",
+    ),
+    # Qianfan (百度千帆): OpenAI-compatible API
+    ProviderSpec(
+        name="qianfan",
+        keywords=("qianfan", "ernie"),
+        env_key="QIANFAN_API_KEY",
+        display_name="Qianfan",
+        backend="openai_compat",
+        default_api_base="https://qianfan.baidubce.com/v2"
     ),
 )
 

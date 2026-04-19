@@ -203,6 +203,8 @@ class LCMStore:
     _MAX_FAILURES_BEFORE_RAW_ARCHIVE = 3
 
     def __init__(self, workspace: Path):
+        # no-op for upstream compat
+
         self.lcm_dir = ensure_dir(workspace / "lcm")
         self.db_path = self.lcm_dir / "lcm.db"
         self._consecutive_failures = 0
@@ -635,6 +637,52 @@ class LCMStore:
             db.close()
 
 
+
+
+
+
+
+
+
+
+        """Upstream compat stub."""
+        return self.get_memory_context()
+
+        """Upstream compat stub."""
+        return 0
+
+        """Upstream compat stub."""
+        return []
+
+        """Upstream compat stub."""
+        return 0
+
+        """Upstream compat stub."""
+        pass
+
+
+    _git = None
+
+    @property
+    def git(self):
+        return self._git
+
+    def read_memory(self) -> str:
+        return self.get_memory_context()
+
+    def append_history(self, entry: str) -> int:
+        return 0
+
+    def read_unprocessed_history(self, since_cursor: int = 0) -> list:
+        return []
+
+    def get_last_dream_cursor(self) -> int:
+        return 0
+
+    def set_last_dream_cursor(self, cursor: int) -> None:
+        pass
+
+
 # Keep MemoryStore as alias for backward compatibility
 MemoryStore = LCMStore
 
@@ -651,16 +699,17 @@ class MemoryConsolidator:
 
     def __init__(
         self,
-        workspace: Path,
-        provider: LLMProvider,
-        model: str,
-        sessions: SessionManager,
-        context_window_tokens: int,
-        build_messages: Callable[..., list[dict[str, Any]]],
-        get_tool_definitions: Callable[[], list[dict[str, Any]]],
+        workspace: Path = None,
+        provider: LLMProvider = None,
+        model: str = "",
+        sessions: SessionManager = None,
+        context_window_tokens: int = 128000,
+        build_messages: Callable[..., list[dict[str, Any]]] = None,
+        get_tool_definitions: Callable[[], list[dict[str, Any]]] = None,
         max_completion_tokens: int = 4096,
+        store = None,
     ):
-        self.store = LCMStore(workspace)
+        self.store = LCMStore(workspace) if isinstance(workspace, Path) else store
         self.provider = provider
         self.model = model
         self.sessions = sessions
@@ -719,6 +768,9 @@ class MemoryConsolidator:
             self._get_tool_definitions(),
         )
 
+    async def archive(self, messages: list[dict[str, object]], session_key: str = "") -> bool:
+        return await self.archive_messages(messages, session_key)
+
     async def archive_messages(self, messages: list[dict[str, object]], session_key: str = "") -> bool:
         """Archive messages with guaranteed persistence."""
         if not messages:
@@ -728,7 +780,7 @@ class MemoryConsolidator:
                 return True
         return True
 
-    async def maybe_consolidate_by_tokens(self, session: Session) -> None:
+    async def maybe_consolidate_by_tokens(self, session: Session, session_summary: str | None = None) -> None:
         """Loop: archive old messages until prompt fits within safe budget."""
         if not session.messages or self.context_window_tokens <= 0:
             return
@@ -785,3 +837,16 @@ class MemoryConsolidator:
                 estimated, source = self.estimate_session_prompt_tokens(session)
                 if estimated <= 0:
                     return
+
+
+# Aliases for upstream compatibility
+Consolidator = MemoryConsolidator
+
+
+class Dream:
+    """Stub -- LCM handles consolidation."""
+    async def run(self): pass
+    model = None
+    max_batch_size = 5
+    max_iterations = 3
+    annotate_line_ages = False

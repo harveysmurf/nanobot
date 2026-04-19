@@ -145,3 +145,41 @@ def test_response_renderable_without_metadata_keeps_markdown_path():
     renderable = commands._response_renderable(help_text, render_markdown=True)
 
     assert renderable.__class__.__name__ == "Markdown"
+
+
+def test_stream_renderer_stop_for_input_stops_spinner():
+    """stop_for_input should stop the active spinner to avoid prompt_toolkit conflicts."""
+    spinner = MagicMock()
+    mock_console = MagicMock()
+    mock_console.status.return_value = spinner
+
+    # Create renderer with mocked console
+    with patch.object(stream_mod, "_make_console", return_value=mock_console):
+        renderer = stream_mod.StreamRenderer(show_spinner=True)
+        
+        # Verify spinner started
+        spinner.start.assert_called_once()
+        
+        # Stop for input
+        renderer.stop_for_input()
+        
+        # Verify spinner stopped
+        spinner.stop.assert_called_once()
+
+
+def test_make_console_force_terminal_when_stdout_is_tty():
+    """Console should set force_terminal=True when stdout is a TTY (rich output)."""
+    import sys
+    with patch.object(sys.stdout, "isatty", return_value=True):
+        console = stream_mod._make_console()
+        assert console._force_terminal is True
+
+
+def test_make_console_force_terminal_false_when_stdout_is_not_tty():
+    """Console should set force_terminal=False when stdout is not a TTY so that
+    ANSI escape codes (cursor visibility, braille spinner frames) don't pollute
+    piped output such as `docker exec -i` (#3265)."""
+    import sys
+    with patch.object(sys.stdout, "isatty", return_value=False):
+        console = stream_mod._make_console()
+        assert console._force_terminal is False

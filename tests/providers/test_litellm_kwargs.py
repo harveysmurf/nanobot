@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -52,6 +52,57 @@ def _fake_tool_call_response() -> SimpleNamespace:
     choice = SimpleNamespace(message=message, finish_reason="tool_calls")
     usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15)
     return SimpleNamespace(choices=[choice], usage=usage)
+
+
+def _fake_responses_response(content: str = "ok") -> MagicMock:
+    """Build a minimal Responses API response object."""
+    resp = MagicMock()
+    resp.model_dump.return_value = {
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": content}],
+        }],
+        "status": "completed",
+        "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+    }
+    return resp
+
+
+def _fake_responses_stream(text: str = "ok"):
+    async def _stream():
+        yield SimpleNamespace(type="response.output_text.delta", delta=text)
+        yield SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(
+                status="completed",
+                usage=SimpleNamespace(input_tokens=10, output_tokens=5, total_tokens=15),
+                output=[],
+            ),
+        )
+
+    return _stream()
+
+
+def _fake_chat_stream(text: str = "ok"):
+    async def _stream():
+        yield SimpleNamespace(
+            choices=[SimpleNamespace(finish_reason=None, delta=SimpleNamespace(content=text, reasoning_content=None, tool_calls=None))],
+            usage=None,
+        )
+        yield SimpleNamespace(
+            choices=[SimpleNamespace(finish_reason="stop", delta=SimpleNamespace(content=None, reasoning_content=None, tool_calls=None))],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+
+    return _stream()
+
+
+class _FakeResponsesError(Exception):
+    def __init__(self, status_code: int, text: str):
+        super().__init__(text)
+        self.status_code = status_code
+        self.response = SimpleNamespace(status_code=status_code, text=text, headers={})
 
 
 class _StalledStream:
@@ -226,11 +277,291 @@ def test_openai_model_passthrough() -> None:
     assert provider.get_default_model() == "gpt-4o"
 
 
-def test_openai_compat_strips_message_level_reasoning_fields() -> None:
+@pytest.mark.asyncio
+async def test_direct_openai_gpt5_uses_responses_api() -> None:
+    mock_chat = AsyncMock(return_value=_fake_chat_response())
+    mock_responses = AsyncMock(return_value=_fake_responses_response("from responses"))
+    spec = find_by_name("openai")
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as MockClient:
+        client_instance = MockClient.return_value
+        client_instance.chat.completions.create = mock_chat
+        client_instance.responses.create = mock_responses
+
+        provider = OpenAICompatProvider(
+            api_key="sk-test-key",
+            default_model="gpt-5-chat",
+            spec=spec,
+        )
+        result = await provider.chat(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-5-chat",
+        )
+
+    assert result.content == "from responses"
+    mock_responses.assert_awaited_once()
+    mock_chat.assert_not_awaited()
+    call_kwargs = mock_responses.call_args.kwargs
+    assert call_kwargs["model"] == "gpt-5-chat"
+    assert call_kwargs["max_output_tokens"] == 4096
+    assert "input" in call_kwargs
+    assert "messages" not in call_kwargs
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_reasoning_prefers_responses_api() -> None:
+    mock_chat = AsyncMock(return_value=_fake_chat_response())
+    mock_responses = AsyncMock(return_value=_fake_responses_response("reasoned"))
+    spec = find_by_name("openai")
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as MockClient:
+        client_instance = MockClient.return_value
+        client_instance.chat.completions.create = mock_chat
+        client_instance.responses.create = mock_responses
+
+        provider = OpenAICompatProvider(
+            api_key="sk-test-key",
+            default_model="gpt-4o",
+            spec=spec,
+        )
+        await provider.chat(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-4o",
+            reasoning_effort="medium",
+        )
+
+    mock_responses.assert_awaited_once()
+    mock_chat.assert_not_awaited()
+    call_kwargs = mock_responses.call_args.kwargs
+    assert call_kwargs["reasoning"] == {"effort": "medium"}
+    assert call_kwargs["include"] == ["reasoning.encrypted_content"]
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_gpt4o_stays_on_chat_completions() -> None:
+    mock_chat = AsyncMock(return_value=_fake_chat_response())
+    mock_responses = AsyncMock(return_value=_fake_responses_response())
+    spec = find_by_name("openai")
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as MockClient:
+        client_instance = MockClient.return_value
+        client_instance.chat.completions.create = mock_chat
+        client_instance.responses.create = mock_responses
+
+        provider = OpenAICompatProvider(
+            api_key="sk-test-key",
+            default_model="gpt-4o",
+            spec=spec,
+        )
+        await provider.chat(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-4o",
+        )
+
+    mock_chat.assert_awaited_once()
+    mock_responses.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_openrouter_gpt5_stays_on_chat_completions() -> None:
+    mock_chat = AsyncMock(return_value=_fake_chat_response())
+    mock_responses = AsyncMock(return_value=_fake_responses_response())
+    spec = find_by_name("openrouter")
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as MockClient:
+        client_instance = MockClient.return_value
+        client_instance.chat.completions.create = mock_chat
+        client_instance.responses.create = mock_responses
+
+        provider = OpenAICompatProvider(
+            api_key="sk-or-test-key",
+            api_base="https://openrouter.ai/api/v1",
+            default_model="openai/gpt-5",
+            spec=spec,
+        )
+        await provider.chat(
+            messages=[{"role": "user", "content": "hello"}],
+            model="openai/gpt-5",
+        )
+
+    mock_chat.assert_awaited_once()
+    mock_responses.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_streaming_gpt5_uses_responses_api() -> None:
+    mock_chat = AsyncMock(return_value=_StalledStream())
+    mock_responses = AsyncMock(return_value=_fake_responses_stream("hi"))
+    spec = find_by_name("openai")
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as MockClient:
+        client_instance = MockClient.return_value
+        client_instance.chat.completions.create = mock_chat
+        client_instance.responses.create = mock_responses
+
+        provider = OpenAICompatProvider(
+            api_key="sk-test-key",
+            default_model="gpt-5-chat",
+            spec=spec,
+        )
+        result = await provider.chat_stream(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-5-chat",
+        )
+
+    assert result.content == "hi"
+    assert result.finish_reason == "stop"
+    mock_responses.assert_awaited_once()
+    mock_chat.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_responses_404_falls_back_to_chat_completions() -> None:
+    mock_chat = AsyncMock(return_value=_fake_chat_response("from chat"))
+    mock_responses = AsyncMock(side_effect=_FakeResponsesError(404, "Responses endpoint not supported"))
+    spec = find_by_name("openai")
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as MockClient:
+        client_instance = MockClient.return_value
+        client_instance.chat.completions.create = mock_chat
+        client_instance.responses.create = mock_responses
+
+        provider = OpenAICompatProvider(
+            api_key="sk-test-key",
+            default_model="gpt-5-chat",
+            spec=spec,
+        )
+        result = await provider.chat(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-5-chat",
+        )
+
+    assert result.content == "from chat"
+    mock_responses.assert_awaited_once()
+    mock_chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_open_circuit_skips_responses_api() -> None:
+    mock_chat = AsyncMock(return_value=_fake_chat_response("from chat"))
+    mock_responses = AsyncMock(return_value=_fake_responses_response("from responses"))
+    spec = find_by_name("openai")
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as MockClient:
+        client_instance = MockClient.return_value
+        client_instance.chat.completions.create = mock_chat
+        client_instance.responses.create = mock_responses
+
+        provider = OpenAICompatProvider(
+            api_key="sk-test-key",
+            default_model="gpt-5-chat",
+            spec=spec,
+        )
+        for _ in range(3):
+            provider._record_responses_failure("gpt-5-chat", None)
+
+        result = await provider.chat(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-5-chat",
+        )
+
+    assert result.content == "from chat"
+    mock_responses.assert_not_awaited()
+    mock_chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_stream_responses_unsupported_param_falls_back() -> None:
+    mock_chat = AsyncMock(return_value=_fake_chat_stream("fallback stream"))
+    mock_responses = AsyncMock(
+        side_effect=_FakeResponsesError(400, "Unknown parameter: max_output_tokens for Responses API")
+    )
+    spec = find_by_name("openai")
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as MockClient:
+        client_instance = MockClient.return_value
+        client_instance.chat.completions.create = mock_chat
+        client_instance.responses.create = mock_responses
+
+        provider = OpenAICompatProvider(
+            api_key="sk-test-key",
+            default_model="gpt-5-chat",
+            spec=spec,
+        )
+        result = await provider.chat_stream(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-5-chat",
+        )
+
+    assert result.content == "fallback stream"
+    mock_responses.assert_awaited_once()
+    mock_chat.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_direct_openai_responses_rate_limit_does_not_fallback() -> None:
+    mock_chat = AsyncMock(return_value=_fake_chat_response("from chat"))
+    mock_responses = AsyncMock(side_effect=_FakeResponsesError(429, "rate limit"))
+    spec = find_by_name("openai")
+
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI") as MockClient:
+        client_instance = MockClient.return_value
+        client_instance.chat.completions.create = mock_chat
+        client_instance.responses.create = mock_responses
+
+        provider = OpenAICompatProvider(
+            api_key="sk-test-key",
+            default_model="gpt-5-chat",
+            spec=spec,
+        )
+        result = await provider.chat(
+            messages=[{"role": "user", "content": "hello"}],
+            model="gpt-5-chat",
+        )
+
+    assert result.finish_reason == "error"
+    mock_responses.assert_awaited_once()
+    mock_chat.assert_not_awaited()
+
+
+def test_openai_compat_supports_temperature_matches_reasoning_model_rules() -> None:
+    assert OpenAICompatProvider._supports_temperature("gpt-4o") is True
+    assert OpenAICompatProvider._supports_temperature("gpt-5-chat") is False
+    assert OpenAICompatProvider._supports_temperature("o3-mini") is False
+    assert OpenAICompatProvider._supports_temperature("gpt-4o", reasoning_effort="medium") is False
+
+
+def test_openai_compat_build_kwargs_uses_gpt5_safe_parameters() -> None:
+    spec = find_by_name("openai")
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
+        provider = OpenAICompatProvider(
+            api_key="sk-test-key",
+            default_model="gpt-5-chat",
+            spec=spec,
+        )
+
+    kwargs = provider._build_kwargs(
+        messages=[{"role": "user", "content": "hello"}],
+        tools=None,
+        model="gpt-5-chat",
+        max_tokens=4096,
+        temperature=0.7,
+        reasoning_effort=None,
+        tool_choice=None,
+    )
+
+    assert kwargs["model"] == "gpt-5-chat"
+    assert kwargs["max_completion_tokens"] == 4096
+    assert "max_tokens" not in kwargs
+    assert "temperature" not in kwargs
+
+
+def test_openai_compat_preserves_message_level_reasoning_fields() -> None:
     with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
         provider = OpenAICompatProvider()
 
     sanitized = provider._sanitize_messages([
+        {"role": "user", "content": "hi"},
         {
             "role": "assistant",
             "content": "done",
@@ -244,12 +575,114 @@ def test_openai_compat_strips_message_level_reasoning_fields() -> None:
                     "extra_content": {"google": {"thought_signature": "sig"}},
                 }
             ],
-        }
+        },
+        {"role": "user", "content": "thanks"},
     ])
 
-    assert "reasoning_content" not in sanitized[0]
-    assert "extra_content" not in sanitized[0]
-    assert sanitized[0]["tool_calls"][0]["extra_content"] == {"google": {"thought_signature": "sig"}}
+    assert sanitized[1]["content"] is None
+    assert sanitized[1]["reasoning_content"] == "hidden"
+    assert sanitized[1]["extra_content"] == {"debug": True}
+    assert sanitized[1]["tool_calls"][0]["extra_content"] == {"google": {"thought_signature": "sig"}}
+
+
+def test_openai_compat_keeps_tool_calls_after_consecutive_assistant_messages() -> None:
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
+        provider = OpenAICompatProvider()
+
+    sanitized = provider._sanitize_messages([
+        {"role": "user", "content": "不错"},
+        {"role": "assistant", "content": "对，破 4 万指日可待"},
+        {
+            "role": "assistant",
+            "content": "<think>我再查一下</think>",
+            "tool_calls": [
+                {
+                    "id": "call_function_akxp3wqzn7ph_1",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_function_akxp3wqzn7ph_1", "name": "exec", "content": "ok"},
+        {"role": "user", "content": "多少star了呢"},
+    ])
+
+    assert sanitized[1]["role"] == "assistant"
+    assert sanitized[1]["content"] is None
+    assert sanitized[1]["tool_calls"][0]["id"] == "3ec83c30d"
+    assert sanitized[2]["tool_call_id"] == "3ec83c30d"
+
+
+def test_openai_compat_stringifies_dict_tool_arguments() -> None:
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
+        provider = OpenAICompatProvider()
+
+    sanitized = provider._sanitize_messages([
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": {"cmd": "ls -la"}},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "exec", "content": "ok"},
+        {"role": "user", "content": "done"},
+    ])
+
+    assert sanitized[1]["tool_calls"][0]["function"]["arguments"] == '{"cmd": "ls -la"}'
+
+
+def test_openai_compat_repairs_non_json_tool_arguments_string() -> None:
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
+        provider = OpenAICompatProvider()
+
+    sanitized = provider._sanitize_messages([
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{'cmd': 'pwd'}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "exec", "content": "ok"},
+        {"role": "user", "content": "done"},
+    ])
+
+    assert sanitized[1]["tool_calls"][0]["function"]["arguments"] == '{"cmd": "pwd"}'
+
+
+def test_openai_compat_defaults_missing_tool_arguments_to_empty_object() -> None:
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
+        provider = OpenAICompatProvider()
+
+    sanitized = provider._sanitize_messages([
+        {"role": "user", "content": "hi"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "exec"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_1", "name": "exec", "content": "ok"},
+        {"role": "user", "content": "done"},
+    ])
+
+    assert sanitized[1]["tool_calls"][0]["function"]["arguments"] == "{}"
 
 
 @pytest.mark.asyncio
@@ -275,3 +708,101 @@ async def test_openai_compat_stream_watchdog_returns_error_on_stall(monkeypatch)
     assert result.finish_reason == "error"
     assert result.content is not None
     assert "stream stalled" in result.content
+
+
+# ---------------------------------------------------------------------------
+# Provider-specific thinking parameters (extra_body)
+# ---------------------------------------------------------------------------
+
+def _build_kwargs_for(provider_name: str, model: str, reasoning_effort=None):
+    spec = find_by_name(provider_name)
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
+        p = OpenAICompatProvider(api_key="k", default_model=model, spec=spec)
+    return p._build_kwargs(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=None, model=model, max_tokens=1024, temperature=0.7,
+        reasoning_effort=reasoning_effort, tool_choice=None,
+    )
+
+
+def test_dashscope_thinking_enabled_with_reasoning_effort() -> None:
+    kw = _build_kwargs_for("dashscope", "qwen3-plus", reasoning_effort="medium")
+    assert kw["extra_body"] == {"enable_thinking": True}
+
+
+def test_dashscope_thinking_disabled_for_minimal() -> None:
+    kw = _build_kwargs_for("dashscope", "qwen3-plus", reasoning_effort="minimal")
+    assert kw["extra_body"] == {"enable_thinking": False}
+
+
+def test_dashscope_no_extra_body_when_reasoning_effort_none() -> None:
+    kw = _build_kwargs_for("dashscope", "qwen-turbo", reasoning_effort=None)
+    assert "extra_body" not in kw
+
+
+def test_volcengine_thinking_enabled() -> None:
+    kw = _build_kwargs_for("volcengine", "doubao-seed-2-0-pro", reasoning_effort="high")
+    assert kw["extra_body"] == {"thinking": {"type": "enabled"}}
+
+
+def test_byteplus_thinking_disabled_for_minimal() -> None:
+    kw = _build_kwargs_for("byteplus", "doubao-seed-2-0-pro", reasoning_effort="minimal")
+    assert kw["extra_body"] == {"thinking": {"type": "disabled"}}
+
+
+def test_byteplus_no_extra_body_when_reasoning_effort_none() -> None:
+    kw = _build_kwargs_for("byteplus", "doubao-seed-2-0-pro", reasoning_effort=None)
+    assert "extra_body" not in kw
+
+
+def test_openai_no_thinking_extra_body() -> None:
+    """Non-thinking providers should never get extra_body for thinking."""
+    kw = _build_kwargs_for("openai", "gpt-4o", reasoning_effort="medium")
+    assert "extra_body" not in kw
+
+
+def test_kimi_k25_thinking_enabled() -> None:
+    """kimi-k2.5 with reasoning_effort set should opt in to thinking."""
+    kw = _build_kwargs_for("moonshot", "kimi-k2.5", reasoning_effort="medium")
+    assert kw.get("extra_body") == {"thinking": {"type": "enabled"}}
+
+
+def test_kimi_k25_thinking_disabled_for_minimal() -> None:
+    """reasoning_effort='minimal' maps to thinking disabled for kimi-k2.5."""
+    kw = _build_kwargs_for("moonshot", "kimi-k2.5", reasoning_effort="minimal")
+    assert kw.get("extra_body") == {"thinking": {"type": "disabled"}}
+
+
+def test_kimi_k25_no_extra_body_when_reasoning_effort_none() -> None:
+    """Without reasoning_effort the thinking param must not be injected."""
+    kw = _build_kwargs_for("moonshot", "kimi-k2.5", reasoning_effort=None)
+    assert "extra_body" not in kw
+
+
+def test_kimi_k25_thinking_enabled_with_openrouter_prefix() -> None:
+    """OpenRouter-style model names like moonshotai/kimi-k2.5 must trigger thinking."""
+    kw = _build_kwargs_for("openrouter", "moonshotai/kimi-k2.5", reasoning_effort="medium")
+    assert kw.get("extra_body") == {"thinking": {"type": "enabled"}}
+
+def test_kimi_k25_thinking_disabled_with_openrouter_prefix() -> None:
+    """OpenRouter names must NOT trigger thinking without reasoning_effort."""
+    kw = _build_kwargs_for("openrouter", "moonshotai/kimi-k2.5", reasoning_effort=None)
+    assert "extra_body" not in kw
+
+
+def test_kimi_k26_code_preview_thinking_enabled() -> None:
+    """k2.6-code-preview also supports thinking; should behave like k2.5."""
+    kw = _build_kwargs_for("moonshot", "k2.6-code-preview", reasoning_effort="high")
+    assert kw.get("extra_body") == {"thinking": {"type": "enabled"}}
+
+
+def test_kimi_k2_series_no_thinking_injection() -> None:
+    """kimi-k2 (non-thinking) models must NOT receive extra_body.thinking."""
+    kw = _build_kwargs_for("moonshot", "kimi-k2", reasoning_effort="high")
+    assert "extra_body" not in kw
+
+
+def test_kimi_k2_thinking_series_no_thinking_injection() -> None:
+    """kimi-k2-thinking series models must NOT receive extra_body.thinking."""
+    kw = _build_kwargs_for("moonshot", "kimi-k2-thinking", reasoning_effort="high")
+    assert "extra_body" not in kw

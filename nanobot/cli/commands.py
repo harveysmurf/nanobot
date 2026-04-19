@@ -1,12 +1,11 @@
 """CLI commands for nanobot."""
 
 import asyncio
-from contextlib import contextmanager, nullcontext
-
 import os
 import select
 import signal
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +21,7 @@ if sys.platform == "win32":
             pass
 
 import typer
+from loguru import logger
 from prompt_toolkit import PromptSession, print_formatted_text
 from prompt_toolkit.application import run_in_terminal
 from prompt_toolkit.formatted_text import ANSI, HTML
@@ -33,10 +33,28 @@ from rich.table import Table
 from rich.text import Text
 
 from nanobot import __logo__, __version__
+
+
+class SafeFileHistory(FileHistory):
+    """FileHistory subclass that sanitizes surrogate characters on write.
+
+    On Windows, special Unicode input (emoji, mixed-script) can produce
+    surrogate characters that crash prompt_toolkit's file write.
+    See issue #2846.
+    """
+
+    def store_string(self, string: str) -> None:
+        safe = string.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace")
+        super().store_string(safe)
 from nanobot.cli.stream import StreamRenderer, ThinkingSpinner
 from nanobot.config.paths import get_workspace_path, is_default_workspace
 from nanobot.config.schema import Config
 from nanobot.utils.helpers import sync_workspace_templates
+from nanobot.utils.restart import (
+    consume_restart_notice_from_env,
+    format_restart_completed_message,
+    should_show_cli_restart_notice,
+)
 
 app = typer.Typer(
     name="nanobot",
@@ -67,6 +85,7 @@ def _flush_pending_tty_input() -> None:
 
     try:
         import termios
+
         termios.tcflush(fd, termios.TCIFLUSH)
         return
     except Exception:
@@ -89,6 +108,7 @@ def _restore_terminal() -> None:
         return
     try:
         import termios
+
         termios.tcsetattr(sys.stdin.fileno(), termios.TCSADRAIN, _SAVED_TERM_ATTRS)
     except Exception:
         pass
@@ -101,6 +121,7 @@ def _init_prompt_session() -> None:
     # Save terminal state so we can restore it on exit
     try:
         import termios
+
         _SAVED_TERM_ATTRS = termios.tcgetattr(sys.stdin.fileno())
     except Exception:
         pass
@@ -111,9 +132,9 @@ def _init_prompt_session() -> None:
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
     _PROMPT_SESSION = PromptSession(
-        history=FileHistory(str(history_file)),
+        history=SafeFileHistory(str(history_file)),
         enable_open_in_editor=False,
-        multiline=False,   # Enter submits (single line mode)
+        multiline=False,  # Enter submits (single line mode)
     )
 
 
@@ -225,7 +246,6 @@ async def _read_interactive_input_async() -> str:
         raise KeyboardInterrupt from exc
 
 
-
 def version_callback(value: bool):
     if value:
         console.print(f"{__logo__} nanobot v{__version__}")
@@ -275,8 +295,12 @@ def onboard(
             config = _apply_workspace_override(load_config(config_path))
         else:
             console.print(f"[yellow]Config already exists at {config_path}[/yellow]")
-            console.print("  [bold]y[/bold] = overwrite with defaults (existing values will be lost)")
-            console.print("  [bold]N[/bold] = refresh config, keeping existing values and adding new fields")
+            console.print(
+                "  [bold]y[/bold] = overwrite with defaults (existing values will be lost)"
+            )
+            console.print(
+                "  [bold]N[/bold] = refresh config, keeping existing values and adding new fields"
+            )
             if typer.confirm("Overwrite?"):
                 config = _apply_workspace_override(Config())
                 save_config(config, config_path)
@@ -284,7 +308,9 @@ def onboard(
             else:
                 config = _apply_workspace_override(load_config(config_path))
                 save_config(config, config_path)
-                console.print(f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)")
+                console.print(
+                    f"[green]✓[/green] Config refreshed at {config_path} (existing values preserved)"
+                )
     else:
         config = _apply_workspace_override(Config())
         # In wizard mode, don't save yet - the wizard will handle saving if should_save=True
@@ -334,7 +360,9 @@ def onboard(
         console.print(f"  1. Add your API key to [cyan]{config_path}[/cyan]")
         console.print("     Get one at: https://openrouter.ai/keys")
         console.print(f"  2. Chat: [cyan]{agent_cmd}[/cyan]")
-    console.print("\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]")
+    console.print(
+        "\n[dim]Want Telegram/WhatsApp? See: https://github.com/HKUDS/nanobot#-chat-apps[/dim]"
+    )
 
 
 def _merge_missing_defaults(existing: Any, defaults: Any) -> Any:
@@ -407,9 +435,11 @@ def _make_provider(config: Config):
     # --- instantiation by backend ---
     if backend == "openai_codex":
         from nanobot.providers.openai_codex_provider import OpenAICodexProvider
+
         provider = OpenAICodexProvider(default_model=model)
     elif backend == "azure_openai":
         from nanobot.providers.azure_openai_provider import AzureOpenAIProvider
+
         provider = AzureOpenAIProvider(
             api_key=p.api_key,
             api_base=p.api_base,
@@ -420,6 +450,7 @@ def _make_provider(config: Config):
         provider = GitHubCopilotProvider(default_model=model)
     elif backend == "anthropic":
         from nanobot.providers.anthropic_provider import AnthropicProvider
+
         provider = AnthropicProvider(
             api_key=p.api_key if p else None,
             api_base=config.get_api_base(model),
@@ -428,6 +459,7 @@ def _make_provider(config: Config):
         )
     else:
         from nanobot.providers.openai_compat_provider import OpenAICompatProvider
+
         provider = OpenAICompatProvider(
             api_key=p.api_key if p else None,
             api_base=config.get_api_base(model),
@@ -447,7 +479,7 @@ def _make_provider(config: Config):
 
 def _load_runtime_config(config: str | None = None, workspace: str | None = None) -> Config:
     """Load config and optionally override the active workspace."""
-    from nanobot.config.loader import load_config, set_config_path
+    from nanobot.config.loader import load_config, resolve_config_env_vars, set_config_path
 
     config_path = None
     if config:
@@ -458,7 +490,11 @@ def _load_runtime_config(config: str | None = None, workspace: str | None = None
         set_config_path(config_path)
         console.print(f"[dim]Using config: {config_path}[/dim]")
 
-    loaded = load_config(config_path)
+    try:
+        loaded = resolve_config_env_vars(load_config(config_path))
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
     _warn_deprecated_config_keys(config_path)
     if workspace:
         loaded.agents.defaults.workspace = workspace
@@ -468,6 +504,7 @@ def _load_runtime_config(config: str | None = None, workspace: str | None = None
 def _warn_deprecated_config_keys(config_path: Path | None) -> None:
     """Hint users to remove obsolete keys from their config file."""
     import json
+
     from nanobot.config.loader import get_config_path
 
     path = config_path or get_config_path()
@@ -491,6 +528,7 @@ def _migrate_cron_store(config: "Config") -> None:
     if legacy_path.is_file() and not new_path.exists():
         new_path.parent.mkdir(parents=True, exist_ok=True)
         import shutil
+
         shutil.move(str(legacy_path), str(new_path))
 
 
@@ -545,8 +583,7 @@ def serve(
         context_block_limit=runtime_config.agents.defaults.context_block_limit,
         max_tool_result_chars=runtime_config.agents.defaults.max_tool_result_chars,
         provider_retry_mode=runtime_config.agents.defaults.provider_retry_mode,
-        web_search_config=runtime_config.tools.web.search,
-        web_proxy=runtime_config.tools.web.proxy or None,
+        web_config=runtime_config.tools.web,
         exec_config=runtime_config.tools.exec,
         restrict_to_workspace=runtime_config.tools.restrict_to_workspace,
         session_manager=session_manager,
@@ -554,6 +591,9 @@ def serve(
         channels_config=runtime_config.channels,
         timezone=runtime_config.agents.defaults.timezone,
         unified_session=runtime_config.agents.defaults.unified_session,
+        disabled_skills=runtime_config.agents.defaults.disabled_skills,
+        session_ttl_minutes=runtime_config.agents.defaults.session_ttl_minutes,
+        tools_config=runtime_config.tools,
     )
 
     model_name = runtime_config.agents.defaults.model
@@ -596,6 +636,21 @@ def gateway(
     config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
 ):
     """Start the nanobot gateway."""
+    if verbose:
+        import logging
+
+        logging.basicConfig(level=logging.DEBUG)
+    cfg = _load_runtime_config(config, workspace)
+    _run_gateway(cfg, port=port)
+
+
+def _run_gateway(
+    config: Config,
+    *,
+    port: int | None = None,
+    open_browser_url: str | None = None,
+) -> None:
+    """Shared gateway runtime; ``open_browser_url`` opens a tab once channels are up."""
     from nanobot.agent.loop import AgentLoop
     from nanobot.bus.queue import MessageBus
     from nanobot.channels.manager import ChannelManager
@@ -604,11 +659,6 @@ def gateway(
     from nanobot.heartbeat.service import HeartbeatService
     from nanobot.session.manager import SessionManager
 
-    if verbose:
-        import logging
-        logging.basicConfig(level=logging.DEBUG)
-
-    config = _load_runtime_config(config, workspace)
     port = port if port is not None else config.gateway.port
 
     console.print(f"{__logo__} Starting nanobot gateway version {__version__} on port {port}...")
@@ -633,11 +683,10 @@ def gateway(
         model=config.agents.defaults.model,
         max_iterations=config.agents.defaults.max_tool_iterations,
         context_window_tokens=config.agents.defaults.context_window_tokens,
+        web_config=config.tools.web,
         context_block_limit=config.agents.defaults.context_block_limit,
         max_tool_result_chars=config.agents.defaults.max_tool_result_chars,
         provider_retry_mode=config.agents.defaults.provider_retry_mode,
-        web_search_config=config.tools.web.search,
-        web_proxy=config.tools.web.proxy or None,
         exec_config=config.tools.exec,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
@@ -646,14 +695,21 @@ def gateway(
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
         unified_session=config.agents.defaults.unified_session,
+        disabled_skills=config.agents.defaults.disabled_skills,
+        session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
+        tools_config=config.tools,
     )
 
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
-        # Dream/LCM consolidation — skip, handled by LCM automatically.
+        # Dream is an internal job — run directly, not through the agent loop.
         if job.name == "dream":
-            logger.info("Dream cron job skipped (LCM handles consolidation)")
+            try:
+                await agent.dream.run()
+                logger.info("Dream cron job completed")
+            except Exception:
+                logger.exception("Dream cron job failed")
             return None
 
         from nanobot.agent.tools.cron import CronTool
@@ -684,12 +740,12 @@ def gateway(
         response = resp.content if resp else ""
 
         message_tool = agent.tools.get("message")
-        if isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
+        if job.payload.deliver and isinstance(message_tool, MessageTool) and message_tool._sent_in_turn:
             return response
 
         if job.payload.deliver and job.payload.to and response:
             should_notify = await evaluate_response(
-                response, job.payload.message, provider, agent.model,
+                response, reminder_note, provider, agent.model,
             )
             if should_notify:
                 from nanobot.bus.events import OutboundMessage
@@ -699,10 +755,12 @@ def gateway(
                     content=response,
                 ))
         return response
+
     cron.on_job = on_cron_job
 
-    # Create channel manager
-    channels = ChannelManager(config, bus)
+    # Create channel manager (forwards SessionManager so the WebSocket channel
+    # can serve the embedded webui's REST surface).
+    channels = ChannelManager(config, bus, session_manager=session_manager)
 
     def _pick_heartbeat_target() -> tuple[str, str]:
         """Pick a routable channel/chat target for heartbeat-triggered messages."""
@@ -775,18 +833,92 @@ def gateway(
 
     console.print(f"[green]✓[/green] Heartbeat: every {hb_cfg.interval_s}s")
 
+    async def _health_server(host: str, health_port: int):
+        """Lightweight HTTP health endpoint on the gateway port."""
+        import json as _json
+
+        async def handle(reader, writer):
+            try:
+                data = await asyncio.wait_for(reader.read(4096), timeout=5)
+            except (asyncio.TimeoutError, ConnectionError):
+                writer.close()
+                return
+
+            request_line = data.split(b"\r\n", 1)[0].decode("utf-8", errors="replace")
+            method, path = "", ""
+            parts = request_line.split(" ")
+            if len(parts) >= 2:
+                method, path = parts[0], parts[1]
+
+            if method == "GET" and path == "/health":
+                body = _json.dumps({"status": "ok"})
+                resp = (
+                    f"HTTP/1.0 200 OK\r\n"
+                    f"Content-Type: application/json\r\n"
+                    f"Content-Length: {len(body)}\r\n"
+                    f"\r\n{body}"
+                )
+            else:
+                body = "Not Found"
+                resp = (
+                    f"HTTP/1.0 404 Not Found\r\n"
+                    f"Content-Type: text/plain\r\n"
+                    f"Content-Length: {len(body)}\r\n"
+                    f"\r\n{body}"
+                )
+
+            writer.write(resp.encode())
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, host, health_port)
+        console.print(f"[green]✓[/green] Health endpoint: http://{host}:{health_port}/health")
+        async with server:
+            await server.serve_forever()
+    # Dream system job skipped — LCM handles consolidation
+
+    async def _open_browser_when_ready() -> None:
+        """Wait for the gateway to bind, then point the user's browser at the webui."""
+        if not open_browser_url:
+            return
+        import webbrowser
+        # Channels start asynchronously; a short poll lets us avoid racing the bind.
+        for _ in range(40):  # ~4s max
+            try:
+                reader, writer = await asyncio.open_connection(
+                    config.gateway.host or "127.0.0.1", port
+                )
+                writer.close()
+                try:
+                    await writer.wait_closed()
+                except Exception:
+                    pass
+                break
+            except OSError:
+                await asyncio.sleep(0.1)
+        try:
+            webbrowser.open(open_browser_url)
+            console.print(f"[green]✓[/green] Opened browser at {open_browser_url}")
+        except Exception as e:
+            console.print(f"[yellow]Could not open browser ({e}); visit {open_browser_url}[/yellow]")
+
     async def run():
         try:
             await cron.start()
             await heartbeat.start()
-            await asyncio.gather(
+            tasks = [
                 agent.run(),
                 channels.start_all(),
-            )
+                _health_server(config.gateway.host, port),
+            ]
+            if open_browser_url:
+                tasks.append(_open_browser_when_ready())
+            await asyncio.gather(*tasks)
         except KeyboardInterrupt:
             console.print("\nShutting down...")
         except Exception:
             import traceback
+
             console.print("\n[red]Error: Gateway crashed unexpectedly[/red]")
             console.print(traceback.format_exc())
         finally:
@@ -799,6 +931,66 @@ def gateway(
     asyncio.run(run())
 
 
+@app.command()
+def web(
+    port: int | None = typer.Option(None, "--port", "-p", help="WebSocket port for the webui"),
+    workspace: str | None = typer.Option(None, "--workspace", "-w", help="Workspace directory"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="Verbose output"),
+    config: str | None = typer.Option(None, "--config", "-c", help="Path to config file"),
+    open_browser: bool = typer.Option(True, "--open/--no-open", help="Open the browser when ready"),
+):
+    """Start the gateway with the embedded webui and (by default) open a browser."""
+    if verbose:
+        import logging
+
+        logging.basicConfig(level=logging.DEBUG)
+
+    cfg = _load_runtime_config(config, workspace)
+
+    # Force the websocket channel on with token-gated auth so the webui is functional.
+    # ``--port`` applies to the webui's websocket/HTTP port, not the gateway's
+    # management port, since that's the only surface users visit.
+    ws_section = cfg.channels.websocket
+    if isinstance(ws_section, dict):
+        ws_section.setdefault("host", "127.0.0.1")
+        ws_section["enabled"] = True
+        ws_section["websocketRequiresToken"] = True
+        if port is not None:
+            ws_section["port"] = port
+        ws_host = ws_section.get("host", "127.0.0.1")
+        ws_port = ws_section.get("port", 8765)
+        ws_path = ws_section.get("path", "/")
+    else:
+        ws_section.enabled = True
+        if hasattr(ws_section, "websocket_requires_token"):
+            ws_section.websocket_requires_token = True
+        if port is not None:
+            ws_section.port = port
+        ws_host = getattr(ws_section, "host", "127.0.0.1") or "127.0.0.1"
+        ws_port = getattr(ws_section, "port", 8765)
+        ws_path = getattr(ws_section, "path", "/") or "/"
+
+    # Confirm the bundled SPA exists before promising the user a browser launch.
+    from nanobot.channels.manager import _default_webui_dist
+
+    dist = _default_webui_dist()
+    if dist is None:
+        console.print(
+            "[yellow]Warning: webui assets not found at nanobot/web/dist/. "
+            "Run `cd webui && bun install && bun run build` from a source checkout.[/yellow]"
+        )
+
+    scheme = "http"
+    # Browsers refuse cookies/JS on 0.0.0.0 — collapse to loopback for the visit URL.
+    visit_host = "127.0.0.1" if ws_host in {"0.0.0.0", "::"} else ws_host
+    open_url = f"{scheme}://{visit_host}:{ws_port}{ws_path if ws_path != '/' else ''}/"
+
+    # The gateway's management port is separate from the webui port; leave it
+    # on its configured default so --port only moves the visible surface.
+    _run_gateway(
+        cfg,
+        open_browser_url=open_url if open_browser else None,
+    )
 
 
 # ============================================================================
@@ -848,11 +1040,10 @@ def agent(
         model=config.agents.defaults.model,
         max_iterations=config.agents.defaults.max_tool_iterations,
         context_window_tokens=config.agents.defaults.context_window_tokens,
+        web_config=config.tools.web,
         context_block_limit=config.agents.defaults.context_block_limit,
         max_tool_result_chars=config.agents.defaults.max_tool_result_chars,
         provider_retry_mode=config.agents.defaults.provider_retry_mode,
-        web_search_config=config.tools.web.search,
-        web_proxy=config.tools.web.proxy or None,
         exec_config=config.tools.exec,
         cron_service=cron,
         restrict_to_workspace=config.tools.restrict_to_workspace,
@@ -860,7 +1051,16 @@ def agent(
         channels_config=config.channels,
         timezone=config.agents.defaults.timezone,
         unified_session=config.agents.defaults.unified_session,
+        disabled_skills=config.agents.defaults.disabled_skills,
+        session_ttl_minutes=config.agents.defaults.session_ttl_minutes,
+        tools_config=config.tools,
     )
+    restart_notice = consume_restart_notice_from_env()
+    if restart_notice and should_show_cli_restart_notice(restart_notice, session_id):
+        _print_agent_response(
+            format_restart_completed_message(restart_notice.started_at_raw),
+            render_markdown=False,
+        )
 
     # Shared reference for progress callbacks
     _thinking: ThinkingSpinner | None = None
@@ -897,7 +1097,7 @@ def agent(
         # Interactive mode — route through bus like other channels
         from nanobot.bus.events import InboundMessage
         _init_prompt_session()
-        console.print(f"{__logo__} Interactive mode (type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit)\n")
+        console.print(f"{__logo__} Interactive mode [bold blue]({config.agents.defaults.model})[/bold blue] — type [bold]exit[/bold] or [bold]Ctrl+C[/bold] to quit\n")
 
         if ":" in session_id:
             cli_channel, cli_chat_id = session_id.split(":", 1)
@@ -979,6 +1179,9 @@ def agent(
                 while True:
                     try:
                         _flush_pending_tty_input()
+                        # Stop spinner before user input to avoid prompt_toolkit conflicts
+                        if renderer:
+                            renderer.stop_for_input()
                         user_input = await _read_interactive_input_async()
                         command = user_input.strip()
                         if not command:
@@ -1055,7 +1258,7 @@ def channels_status(
 
     table = Table(title="Channel Status")
     table.add_column("Channel", style="cyan")
-    table.add_column("Enabled", style="green")
+    table.add_column("Enabled")
 
     for name, cls in sorted(discover_all().items()):
         section = getattr(config.channels, name, None)
@@ -1190,7 +1393,7 @@ def plugins_list():
     table = Table(title="Channel Plugins")
     table.add_column("Name", style="cyan")
     table.add_column("Source", style="magenta")
-    table.add_column("Enabled", style="green")
+    table.add_column("Enabled")
 
     for name in sorted(all_channels):
         cls = all_channels[name]
@@ -1268,6 +1471,7 @@ def _register_login(name: str):
     def decorator(fn):
         _LOGIN_HANDLERS[name] = fn
         return fn
+
     return decorator
 
 
@@ -1298,6 +1502,7 @@ def provider_login(
 def _login_openai_codex() -> None:
     try:
         from oauth_cli_kit import get_token, login_oauth_interactive
+
         token = None
         try:
             token = get_token()
