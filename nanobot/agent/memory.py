@@ -728,7 +728,7 @@ class MemoryConsolidator:
                 return True
         return True
 
-    async def maybe_consolidate_by_tokens(self, session: Session) -> None:
+    async def maybe_consolidate_by_tokens(self, session: Session, session_summary: str | None = None) -> None:
         """Loop: archive old messages until prompt fits within safe budget."""
         if not session.messages or self.context_window_tokens <= 0:
             return
