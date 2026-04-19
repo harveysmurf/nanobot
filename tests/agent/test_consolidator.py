@@ -1,6 +1,8 @@
 """Tests for the lightweight Consolidator — append-only to HISTORY.md."""
 import pytest
-pytestmark = pytest.mark.skip(reason="Upstream memory system replaced by LCM in this fork")
+pytest.skip("Upstream memory replaced by LCM", allow_module_level=True)
+
+import pytest
 
 
 import pytest

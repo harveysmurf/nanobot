@@ -11,7 +11,9 @@ Covers:
 - Context window consolidation is unaffected by unified_session
 """
 import pytest
-pytestmark = pytest.mark.skip(reason="Upstream memory system replaced by LCM in this fork")
+pytest.skip("Upstream memory replaced by LCM", allow_module_level=True)
+
+import pytest
 
 
 import asyncio
