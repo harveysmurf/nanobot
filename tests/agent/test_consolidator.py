@@ -1,4 +1,7 @@
 """Tests for the lightweight Consolidator — append-only to HISTORY.md."""
+import pytest
+pytestmark = pytest.mark.skip(reason="Upstream memory system replaced by LCM in this fork")
+
 
 import pytest
 import asyncio

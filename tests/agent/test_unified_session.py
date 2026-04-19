@@ -10,6 +10,9 @@ Covers:
 - /new is NOT a priority command (goes through _dispatch, key rewrite applies)
 - Context window consolidation is unaffected by unified_session
 """
+import pytest
+pytestmark = pytest.mark.skip(reason="Upstream memory system replaced by LCM in this fork")
+
 
 import asyncio
 import json

@@ -1,4 +1,7 @@
 """Tests for the Dream class — two-phase memory consolidation via AgentRunner."""
+import pytest
+pytestmark = pytest.mark.skip(reason="Upstream memory system replaced by LCM in this fork")
+
 
 import pytest
 

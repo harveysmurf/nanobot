@@ -248,7 +248,7 @@ class AgentLoop:
         self._concurrency_gate: asyncio.Semaphore | None = (
             asyncio.Semaphore(_max) if _max > 0 else None
         )
-        self.memory_consolidator = MemoryConsolidator(
+        self.memory_consolidator = self.consolidator = MemoryConsolidator(
             workspace=workspace,
             provider=provider,
             model=self.model,

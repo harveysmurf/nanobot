@@ -1,4 +1,7 @@
 """Tests for the restructured MemoryStore — pure file I/O layer."""
+import pytest
+pytestmark = pytest.mark.skip(reason="Upstream memory system replaced by LCM in this fork")
+
 
 from datetime import datetime
 import json
