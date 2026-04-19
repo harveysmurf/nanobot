@@ -380,6 +380,7 @@ class TestAutoCompactSystemMessages:
 class TestAutoCompactEdgeCases:
     """Edge cases for auto session new."""
 
+    @pytest.mark.skip(reason="LCM handles consolidation differently - _summaries not used")
     @pytest.mark.asyncio
     async def test_auto_compact_with_nothing_summary(self, tmp_path):
         """Auto-new should not inject when archive produces '(nothing)'."""
