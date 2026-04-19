@@ -1,0 +1,55 @@
+name: Eval
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  eval:
+    runs-on: [self-hosted, eval]
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Clone nanobot-eval
+      run: |
+        if [ -d /home/simo/nanobot-eval ]; then
+          cd /home/simo/nanobot-eval && git pull --ff-only
+        else
+          git clone https://github.com/harveysmurf/nanobot-eval.git /home/simo/nanobot-eval
+        fi
+
+    - name: Run eval
+      working-directory: /home/simo/nanobot-eval
+      run: python3 run_eval.py --sha ${{ github.sha }} --nanobot-dir ${{ github.workspace }} --suite all --timeout 90
+
+    - name: Score results
+      working-directory: /home/simo/nanobot-eval
+      run: |
+        RESULTS=$(ls -t results/${{ github.sha }}*.json 2>/dev/null | head -1)
+        if [ -z "$RESULTS" ]; then
+          RESULTS=$(ls -t results/$(echo ${{ github.sha }} | cut -c1-8)*.json 2>/dev/null | head -1)
+        fi
+        echo "Scoring: $RESULTS"
+        python3 scorer.py "$RESULTS" --nanobot-dir ${{ github.workspace }}
+
+    - name: Compare with baseline
+      working-directory: /home/simo/nanobot-eval
+      if: hashFiles('baseline_scored.json') != ''
+      run: |
+        SCORED=$(ls -t results/*_scored.json 2>/dev/null | head -1)
+        if [ -f baseline_scored.json ] && [ -n "$SCORED" ]; then
+          python3 compare.py baseline_scored.json "$SCORED"
+        fi
+
+    - name: Upload results
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: eval-results-${{ github.sha }}
+        path: /home/simo/nanobot-eval/results/
+        retention-days: 30
