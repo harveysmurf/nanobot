@@ -5,6 +5,10 @@ When memory consolidation receives dict values instead of strings from the LLM
 tool call response, it should serialize them to JSON instead of raising TypeError.
 """
 import pytest
+pytest.skip("Upstream memory system replaced by LCM", allow_module_level=True)
+
+
+import pytest
 pytest.skip("Upstream memory replaced by LCM", allow_module_level=True)
 
 import pytest

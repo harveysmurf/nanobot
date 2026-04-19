@@ -1,10 +1,11 @@
 import asyncio
 import json
+import time
 
 import pytest
 
 from nanobot.cron.service import CronService
-from nanobot.cron.types import CronSchedule
+from nanobot.cron.types import CronJob, CronPayload, CronSchedule
 
 
 async def _wait_until(predicate, *, timeout: float = 1.0, interval: float = 0.01) -> None:
@@ -121,6 +122,41 @@ async def test_run_history_persisted_to_disk(tmp_path) -> None:
     loaded = fresh.get_job(job.id)
     assert len(loaded.state.run_history) == 1
     assert loaded.state.run_history[0].status == "ok"
+
+
+@pytest.mark.asyncio
+async def test_run_job_disabled_does_not_flip_running_state(tmp_path) -> None:
+    store_path = tmp_path / "cron" / "jobs.json"
+    service = CronService(store_path, on_job=lambda _: asyncio.sleep(0))
+    job = service.add_job(
+        name="disabled",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="hello",
+    )
+    service.enable_job(job.id, enabled=False)
+
+    result = await service.run_job(job.id)
+
+    assert result is False
+    assert service._running is False
+
+
+@pytest.mark.asyncio
+async def test_run_job_preserves_running_service_state(tmp_path) -> None:
+    store_path = tmp_path / "cron" / "jobs.json"
+    service = CronService(store_path, on_job=lambda _: asyncio.sleep(0))
+    service._running = True
+    job = service.add_job(
+        name="manual",
+        schedule=CronSchedule(kind="every", every_ms=60_000),
+        message="hello",
+    )
+
+    result = await service.run_job(job.id, force=True)
+
+    assert result is True
+    assert service._running is True
+    service.stop()
 
 
 @pytest.mark.asyncio

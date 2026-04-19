@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -46,6 +47,11 @@ class TestRestartCommand:
     async def test_restart_sends_message_and_calls_execv(self):
         from nanobot.command.builtin import cmd_restart
         from nanobot.command.router import CommandContext
+        from nanobot.utils.restart import (
+            RESTART_NOTIFY_CHANNEL_ENV,
+            RESTART_NOTIFY_CHAT_ID_ENV,
+            RESTART_STARTED_AT_ENV,
+        )
 
         loop, bus = _make_loop()
         msg = InboundMessage(channel="cli", sender_id="user", chat_id="direct", content="/restart")
@@ -71,6 +77,9 @@ class TestRestartCommand:
              patch("nanobot.command.builtin.os.execv") as mock_execv:
             out = await cmd_restart(ctx)
             assert "Restarting" in out.content
+            assert os.environ.get(RESTART_NOTIFY_CHANNEL_ENV) == "cli"
+            assert os.environ.get(RESTART_NOTIFY_CHAT_ID_ENV) == "direct"
+            assert os.environ.get(RESTART_STARTED_AT_ENV)
 
             assert scheduled
             await scheduled[0]
@@ -155,7 +164,7 @@ class TestRestartCommand:
         loop.sessions.get_or_create.return_value = session
         loop._start_time = time.time() - 125
         loop._last_usage = {"prompt_tokens": 0, "completion_tokens": 0}
-        loop.memory_consolidator.estimate_session_prompt_tokens = MagicMock(
+        loop.consolidator.estimate_session_prompt_tokens = MagicMock(
             return_value=(20500, "tiktoken")
         )
         loop.subagents.get_running_count_by_session.return_value = 0
@@ -220,7 +229,7 @@ class TestRestartCommand:
         session.get_history.return_value = [{"role": "user"}]
         loop.sessions.get_or_create.return_value = session
         loop._last_usage = {"prompt_tokens": 1200, "completion_tokens": 34}
-        loop.memory_consolidator.estimate_session_prompt_tokens = MagicMock(
+        loop.consolidator.estimate_session_prompt_tokens = MagicMock(
             return_value=(0, "none")
         )
         loop.subagents.get_running_count_by_session.return_value = 0

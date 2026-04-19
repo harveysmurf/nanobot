@@ -1,8 +1,7 @@
 """Tests for the lightweight Consolidator — append-only to HISTORY.md."""
 import pytest
-pytest.skip("Upstream memory replaced by LCM", allow_module_level=True)
+pytest.skip("Upstream memory system replaced by LCM", allow_module_level=True)
 
-import pytest
 
 
 import pytest

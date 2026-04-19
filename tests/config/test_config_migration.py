@@ -1,6 +1,18 @@
 import json
+import socket
+from unittest.mock import patch
 
 from nanobot.config.loader import load_config, save_config
+from nanobot.security.network import validate_url_target
+
+
+def _fake_resolve(host: str, results: list[str]):
+    """Return a getaddrinfo mock that maps the given host to fake IP results."""
+    def _resolver(hostname, port, family=0, type_=0):
+        if hostname == host:
+            return [(socket.AF_INET, socket.SOCK_STREAM, 0, "", (ip, 0)) for ip in results]
+        raise socket.gaierror(f"cannot resolve {hostname}")
+    return _resolver
 
 
 def test_load_config_keeps_max_tokens_and_ignores_legacy_memory_window(tmp_path) -> None:

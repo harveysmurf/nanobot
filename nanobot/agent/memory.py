@@ -759,6 +759,9 @@ class MemoryConsolidator:
             self._get_tool_definitions(),
         )
 
+    async def archive(self, messages: list[dict[str, object]], session_key: str = "") -> bool:
+        return await self.archive_messages(messages, session_key)
+
     async def archive_messages(self, messages: list[dict[str, object]], session_key: str = "") -> bool:
         """Archive messages with guaranteed persistence."""
         if not messages:

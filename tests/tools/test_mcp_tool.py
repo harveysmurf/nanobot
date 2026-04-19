@@ -7,7 +7,12 @@ from types import ModuleType, SimpleNamespace
 
 import pytest
 
-from nanobot.agent.tools.mcp import MCPToolWrapper, connect_mcp_servers
+from nanobot.agent.tools.mcp import (
+    MCPResourceWrapper,
+    MCPPromptWrapper,
+    MCPToolWrapper,
+    connect_mcp_servers,
+)
 from nanobot.agent.tools.registry import ToolRegistry
 from nanobot.config.schema import MCPServerConfig
 
@@ -15,6 +20,16 @@ from nanobot.config.schema import MCPServerConfig
 class _FakeTextContent:
     def __init__(self, text: str) -> None:
         self.text = text
+
+
+class _FakeTextResourceContents:
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+class _FakeBlobResourceContents:
+    def __init__(self, blob: bytes) -> None:
+        self.blob = blob
 
 
 @pytest.fixture
@@ -27,7 +42,11 @@ def _fake_mcp_module(
     monkeypatch: pytest.MonkeyPatch, fake_mcp_runtime: dict[str, object | None]
 ) -> None:
     mod = ModuleType("mcp")
-    mod.types = SimpleNamespace(TextContent=_FakeTextContent)
+    mod.types = SimpleNamespace(
+        TextContent=_FakeTextContent,
+        TextResourceContents=_FakeTextResourceContents,
+        BlobResourceContents=_FakeBlobResourceContents,
+    )
 
     class _FakeStdioServerParameters:
         def __init__(self, command: str, args: list[str], env: dict | None = None) -> None:
@@ -73,6 +92,18 @@ def _fake_mcp_module(
     monkeypatch.setitem(sys.modules, "mcp.client.stdio", stdio_mod)
     monkeypatch.setitem(sys.modules, "mcp.client.sse", sse_mod)
     monkeypatch.setitem(sys.modules, "mcp.client.streamable_http", streamable_http_mod)
+
+    shared_mod = ModuleType("mcp.shared")
+    exc_mod = ModuleType("mcp.shared.exceptions")
+
+    class _FakeMcpError(Exception):
+        def __init__(self, code: int = -1, message: str = "error"):
+            self.error = SimpleNamespace(code=code, message=message)
+            super().__init__(message)
+
+    exc_mod.McpError = _FakeMcpError
+    monkeypatch.setitem(sys.modules, "mcp.shared", shared_mod)
+    monkeypatch.setitem(sys.modules, "mcp.shared.exceptions", exc_mod)
 
 
 def _make_wrapper(session: object, *, timeout: float = 0.1) -> MCPToolWrapper:

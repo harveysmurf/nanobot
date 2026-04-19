@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -52,6 +52,57 @@ def _fake_tool_call_response() -> SimpleNamespace:
     choice = SimpleNamespace(message=message, finish_reason="tool_calls")
     usage = SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15)
     return SimpleNamespace(choices=[choice], usage=usage)
+
+
+def _fake_responses_response(content: str = "ok") -> MagicMock:
+    """Build a minimal Responses API response object."""
+    resp = MagicMock()
+    resp.model_dump.return_value = {
+        "output": [{
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": content}],
+        }],
+        "status": "completed",
+        "usage": {"input_tokens": 10, "output_tokens": 5, "total_tokens": 15},
+    }
+    return resp
+
+
+def _fake_responses_stream(text: str = "ok"):
+    async def _stream():
+        yield SimpleNamespace(type="response.output_text.delta", delta=text)
+        yield SimpleNamespace(
+            type="response.completed",
+            response=SimpleNamespace(
+                status="completed",
+                usage=SimpleNamespace(input_tokens=10, output_tokens=5, total_tokens=15),
+                output=[],
+            ),
+        )
+
+    return _stream()
+
+
+def _fake_chat_stream(text: str = "ok"):
+    async def _stream():
+        yield SimpleNamespace(
+            choices=[SimpleNamespace(finish_reason=None, delta=SimpleNamespace(content=text, reasoning_content=None, tool_calls=None))],
+            usage=None,
+        )
+        yield SimpleNamespace(
+            choices=[SimpleNamespace(finish_reason="stop", delta=SimpleNamespace(content=None, reasoning_content=None, tool_calls=None))],
+            usage=SimpleNamespace(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+        )
+
+    return _stream()
+
+
+class _FakeResponsesError(Exception):
+    def __init__(self, status_code: int, text: str):
+        super().__init__(text)
+        self.status_code = status_code
+        self.response = SimpleNamespace(status_code=status_code, text=text, headers={})
 
 
 class _StalledStream:
@@ -510,6 +561,7 @@ def test_openai_compat_preserves_message_level_reasoning_fields() -> None:
         provider = OpenAICompatProvider()
 
     sanitized = provider._sanitize_messages([
+        {"role": "user", "content": "hi"},
         {
             "role": "assistant",
             "content": "done",
@@ -523,12 +575,42 @@ def test_openai_compat_preserves_message_level_reasoning_fields() -> None:
                     "extra_content": {"google": {"thought_signature": "sig"}},
                 }
             ],
-        }
+        },
+        {"role": "user", "content": "thanks"},
     ])
 
-    assert "reasoning_content" not in sanitized[0]
-    assert "extra_content" not in sanitized[0]
-    assert sanitized[0]["tool_calls"][0]["extra_content"] == {"google": {"thought_signature": "sig"}}
+    assert sanitized[1]["content"] is None
+    assert sanitized[1]["reasoning_content"] == "hidden"
+    assert sanitized[1]["extra_content"] == {"debug": True}
+    assert sanitized[1]["tool_calls"][0]["extra_content"] == {"google": {"thought_signature": "sig"}}
+
+
+def test_openai_compat_keeps_tool_calls_after_consecutive_assistant_messages() -> None:
+    with patch("nanobot.providers.openai_compat_provider.AsyncOpenAI"):
+        provider = OpenAICompatProvider()
+
+    sanitized = provider._sanitize_messages([
+        {"role": "user", "content": "不错"},
+        {"role": "assistant", "content": "对，破 4 万指日可待"},
+        {
+            "role": "assistant",
+            "content": "<think>我再查一下</think>",
+            "tool_calls": [
+                {
+                    "id": "call_function_akxp3wqzn7ph_1",
+                    "type": "function",
+                    "function": {"name": "exec", "arguments": "{}"},
+                }
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call_function_akxp3wqzn7ph_1", "name": "exec", "content": "ok"},
+        {"role": "user", "content": "多少star了呢"},
+    ])
+
+    assert sanitized[1]["role"] == "assistant"
+    assert sanitized[1]["content"] is None
+    assert sanitized[1]["tool_calls"][0]["id"] == "3ec83c30d"
+    assert sanitized[2]["tool_call_id"] == "3ec83c30d"
 
 
 def test_openai_compat_stringifies_dict_tool_arguments() -> None:
