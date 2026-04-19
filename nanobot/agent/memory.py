@@ -661,9 +661,11 @@ class LCMStore:
         pass
 
 
+    _git = None
+
     @property
     def git(self):
-        return None
+        return self._git
 
     def read_memory(self) -> str:
         return self.get_memory_context()
@@ -697,13 +699,13 @@ class MemoryConsolidator:
 
     def __init__(
         self,
-        workspace: Path,
-        provider: LLMProvider,
-        model: str,
-        sessions: SessionManager,
-        context_window_tokens: int,
-        build_messages: Callable[..., list[dict[str, Any]]],
-        get_tool_definitions: Callable[[], list[dict[str, Any]]],
+        workspace: Path = None,
+        provider: LLMProvider = None,
+        model: str = "",
+        sessions: SessionManager = None,
+        context_window_tokens: int = 128000,
+        build_messages: Callable[..., list[dict[str, Any]]] = None,
+        get_tool_definitions: Callable[[], list[dict[str, Any]]] = None,
         max_completion_tokens: int = 4096,
         store = None,
     ):
